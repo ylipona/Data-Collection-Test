@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Verified!</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #1e1f22; color: #dbdee1;
+      font-family: 'gg sans', 'Noto Sans', Whitney, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      display: flex; align-items: center; justify-content: center; min-height: 100vh;
+    }
+    .card {
+      background: #2b2d31; border-radius: 12px; padding: 48px 40px 36px;
+      width: 100%; max-width: 400px; text-align: center;
+      box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    }
+    .icon { font-size: 60px; margin-bottom: 20px; animation: pop .4s cubic-bezier(.175,.885,.32,1.275); }
+    @keyframes pop { 0%{transform:scale(0);opacity:0} 100%{transform:scale(1);opacity:1} }
+    h1 { font-size: 22px; font-weight: 700; color: #23a55a; margin-bottom: 10px; }
+    p  { font-size: 14px; color: #949ba4; line-height: 1.6; margin-bottom: 6px; }
+    .tag {
+      display: inline-block; margin-top: 20px;
+      background: #1a3a26; color: #23a55a; border: 1px solid #2a5e3e;
+      border-radius: 100px; padding: 6px 18px; font-size: 13px; font-weight: 600;
+    }
+    .footer { margin-top: 24px; font-size: 11px; color: #4e5058; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">✅</div>
+    <h1>You're Verified!</h1>
+    <p>Welcome, <strong style="color:#f2f3f5">{{ username }}</strong>.</p>
+    {% if role_given %}
+      <p>You've been given the <strong style="color:#f2f3f5">Verified</strong> role.</p>
+    {% else %}
+      <p>Your role will be assigned shortly.</p>
+    {% endif %}
+    <div class="tag">🎉  Access granted — you can close this tab</div>
+    <div class="footer">Powered by Discord OAuth2</div>
+  </div>
+</body>
+</html>
