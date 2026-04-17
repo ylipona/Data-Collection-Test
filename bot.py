@@ -1,11 +1,10 @@
 """
 bot.py — Discord bot component.
-Handles: persistent Verify button, auto-posting verify message,
-         welcoming new members, and assigning the Verified role.
 
-KEY CHANGE: The verify button now links to OUR /start?state=X page first,
-which silently collects fingerprint, THEN redirects to Discord OAuth2.
-This ensures browser fingerprint data is always captured.
+FIX: No longer imports from app.py (that caused a circular import on startup).
+     State tokens are generated here and passed via the URL to /start?state=X.
+     The user ID is retrieved from Discord's OAuth2 response in the callback —
+     we don't need to track state→user_id here.
 """
 
 import secrets
@@ -14,17 +13,17 @@ import discord
 from discord.ext import commands
 from discord import ui
 
-from config import (
-    BOT_TOKEN, GUILD_ID, VERIFY_CHANNEL_ID, VERIFIED_ROLE_ID, APP_BASE_URL
-)
+from config import BOT_TOKEN, GUILD_ID, VERIFY_CHANNEL_ID, VERIFIED_ROLE_ID, APP_BASE_URL
 
 
 def build_start_url(state: str) -> str:
-    """Link goes to OUR site first so we can collect fingerprint before Discord OAuth2."""
+    """
+    Link goes to OUR /start page first so fingerprint is collected
+    BEFORE the user ever reaches Discord's OAuth2 screen.
+    """
     return f"{APP_BASE_URL}/start?state={state}"
 
 
-# ─── Persistent Verify Button View ────────────────────────────────────────────
 class VerifyView(ui.View):
     """Persistent view — survives bot restarts."""
 
@@ -38,13 +37,8 @@ class VerifyView(ui.View):
         emoji="🔐",
     )
     async def on_verify(self, interaction: discord.Interaction, button: ui.Button):
-        state = secrets.token_urlsafe(32)
+        state     = secrets.token_urlsafe(32)
         start_url = build_start_url(state)
-
-        # Store the state → user_id mapping in the Flask app's store
-        # (imported lazily to avoid circular imports at module load time)
-        from app import pending_states
-        pending_states[state] = interaction.user.id
 
         link_view = ui.View()
         link_view.add_item(
@@ -61,12 +55,11 @@ class VerifyView(ui.View):
             description="Click the button below to verify your account and unlock the server.",
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text="Button expires — click Verify Now again if it stops working.")
+        embed.set_footer(text="If the button stops working, click Verify Now again.")
 
         await interaction.response.send_message(embed=embed, view=link_view, ephemeral=True)
 
 
-# ─── Bot Class ────────────────────────────────────────────────────────────────
 class VerificationBot(commands.Bot):
 
     def __init__(self):
@@ -119,7 +112,8 @@ class VerificationBot(commands.Bot):
             title="🛡️  Verify Your Account",
             description=(
                 "**Welcome!**\n\n"
-                "Before you can access the rest of the server, please verify your Discord account.\n\n"
+                "Before you can access the rest of the server, "
+                "please verify your Discord account.\n\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "⬇️  **Click the button below to get started.**"
             ),
@@ -149,7 +143,7 @@ class VerificationBot(commands.Bot):
         except discord.NotFound:
             return False
         except Exception as e:
-            print(f"❌  Role assignment error: {e}")
+            print(f"❌  Role error: {e}")
             return False
 
 
