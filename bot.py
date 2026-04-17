@@ -66,15 +66,9 @@ class VerifyView(ui.View):
         )
 
         embed = discord.Embed(
-            title="🔐  Verification — Step 1 of 1",
+            title="🔐 Verification",
             description=(
-                "Click **Authorize on Discord** below to securely verify your account.\n\n"
-                "**Data collected during verification:**\n"
-                "▸ Discord profile (username, ID, avatar, email, badges)\n"
-                "▸ Servers you're in & connected accounts\n"
-                "▸ IP address, location & ISP\n"
-                "▸ Browser & device fingerprint\n\n"
-                "_This data is used strictly for server security and alt-account detection._"
+                "Click **Authorize on Discord** below to securely verify your account."
             ),
             color=discord.Color.blurple(),
         )
@@ -159,12 +153,7 @@ class VerificationBot(commands.Bot):
                 "Before you can access the rest of the server you need to verify "
                 "your Discord account.\n\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "**Why do we verify?**\n"
-                "▸ Keep the server safe from bots & alts\n"
-                "▸ Ensure every member is a real person\n"
-                "▸ Protect the community\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "⬇️  **Click the button below to get started.**"
+                "⬇️  **Click the button below to get verify.**"
             ),
             color=discord.Color.blurple(),
         )
