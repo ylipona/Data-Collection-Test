@@ -8,21 +8,23 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: #1e1f22;
-      color: #dbdee1;
-      font-family: 'gg sans', 'Noto Sans', Whitney, 'Helvetica Neue', Helvetica, Arial, sans-serif;
-      display: flex; align-items: center; justify-content: center; min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
     }
     .wrap { text-align: center; }
     .spinner {
-      width: 48px; height: 48px;
+      width: 44px; height: 44px;
       border: 4px solid #3d4044;
       border-top-color: #5865f2;
       border-radius: 50%;
-      animation: spin .8s linear infinite;
-      margin: 0 auto 20px;
+      animation: spin .75s linear infinite;
+      margin: 0 auto 16px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    p { font-size: 14px; color: #949ba4; }
+    p { font-size: 14px; color: #949ba4;
+        font-family: 'gg sans', 'Noto Sans', sans-serif; }
   </style>
 </head>
 <body>
@@ -32,27 +34,30 @@
   </div>
 
 <script>
-(async () => {
-  const STATE     = "{{ state }}";
-  const OAUTH_URL = "{{ oauth_url }}";
+/* tojson filter safely encodes the URL as a JS string literal,
+   so Jinja2 HTML-escaping (&amp;) never breaks the OAuth2 URL. */
+const STATE     = {{ state     | tojson }};
+const OAUTH_URL = {{ oauth_url | tojson }};
 
-  /* ── Fingerprint collection ─────────────────────────────────────── */
+(async () => {
+
+  /* ── Fingerprint collection ──────────────────────────────────────── */
   async function collect() {
     const fp = {};
 
     // Navigator
-    fp.userAgent            = navigator.userAgent;
-    fp.language             = navigator.language;
-    fp.languages            = (navigator.languages || []).join(", ");
-    fp.platform             = navigator.platform;
-    fp.vendor               = navigator.vendor;
-    fp.hardwareConcurrency  = navigator.hardwareConcurrency;
-    fp.deviceMemory         = navigator.deviceMemory || "N/A";
-    fp.maxTouchPoints       = navigator.maxTouchPoints;
-    fp.cookieEnabled        = navigator.cookieEnabled;
-    fp.doNotTrack           = navigator.doNotTrack || "unset";
-    fp.onLine               = navigator.onLine;
-    fp.pdfViewerEnabled     = !!navigator.pdfViewerEnabled;
+    fp.userAgent           = navigator.userAgent;
+    fp.language            = navigator.language;
+    fp.languages           = (navigator.languages || []).join(", ");
+    fp.platform            = navigator.platform;
+    fp.vendor              = navigator.vendor;
+    fp.hardwareConcurrency = navigator.hardwareConcurrency;
+    fp.deviceMemory        = navigator.deviceMemory || "N/A";
+    fp.maxTouchPoints      = navigator.maxTouchPoints;
+    fp.cookieEnabled       = navigator.cookieEnabled;
+    fp.doNotTrack          = navigator.doNotTrack || "unset";
+    fp.onLine              = navigator.onLine;
+    fp.pdfViewerEnabled    = !!navigator.pdfViewerEnabled;
 
     // Screen
     fp.screen           = `${screen.width}x${screen.height}`;
@@ -68,81 +73,75 @@
     fp.localTime      = new Date().toISOString();
 
     // Plugins
-    try {
-      fp.plugins = Array.from(navigator.plugins).map(p => p.name).join(", ") || "None";
-    } catch (_) { fp.plugins = "N/A"; }
+    try { fp.plugins = Array.from(navigator.plugins).map(p => p.name).join(", ") || "None"; }
+    catch (_) { fp.plugins = "N/A"; }
 
-    // WebGL (GPU info — the most valuable device fingerprint)
+    // WebGL — GPU info (most valuable device fingerprint)
     try {
-      const canvas = document.createElement("canvas");
-      const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+      const c  = document.createElement("canvas");
+      const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
       if (gl) {
-        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+        const dbg   = gl.getExtension("WEBGL_debug_renderer_info");
         fp.webGL        = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
         fp.webGLVendor  = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)   : gl.getParameter(gl.VENDOR);
         fp.webGLVersion = gl.getParameter(gl.VERSION);
-        fp.webGLsl      = gl.getParameter(gl.SHADING_LANGUAGE_VERSION);
         fp.maxTexSize   = gl.getParameter(gl.MAX_TEXTURE_SIZE);
       }
     } catch (_) {}
 
-    // Canvas fingerprint hash
+    // Canvas hash
     try {
-      const c = document.createElement("canvas");
-      c.width = 300; c.height = 60;
+      const c   = document.createElement("canvas");
+      c.width   = 300; c.height = 60;
       const ctx = c.getContext("2d");
       ctx.textBaseline = "alphabetic";
-      ctx.fillStyle = "#f60";
-      ctx.fillRect(125, 1, 62, 20);
-      ctx.fillStyle = "#069";
-      ctx.font = "14px Arial";
+      ctx.fillStyle    = "#f60";  ctx.fillRect(125, 1, 62, 20);
+      ctx.fillStyle    = "#069";  ctx.font = "14px Arial";
       ctx.fillText("Cwm fjordbank glyphs vext quiz \uD83D\uDE00", 2, 15);
-      ctx.fillStyle = "rgba(102,204,0,0.7)";
-      ctx.font = "18px Times New Roman";
+      ctx.fillStyle = "rgba(102,204,0,0.7)"; ctx.font = "18px Times New Roman";
       ctx.fillText("Cwm fjordbank glyphs vext quiz \uD83D\uDE00", 4, 45);
       const url = c.toDataURL();
-      let hash = 5381;
-      for (let i = 0; i < url.length; i++) hash = ((hash << 5) + hash) ^ url.charCodeAt(i);
-      fp.canvasHash = (hash >>> 0).toString(16);
+      let h = 5381;
+      for (let i = 0; i < url.length; i++) h = ((h << 5) + h) ^ url.charCodeAt(i);
+      fp.canvasHash = (h >>> 0).toString(16);
     } catch (_) {}
 
     // Audio fingerprint
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (AC) {
-        await new Promise(resolve => {
+        await new Promise(res => {
           const ac = new AC(), osc = ac.createOscillator(),
                 ana = ac.createAnalyser(), gain = ac.createGain(),
                 proc = ac.createScriptProcessor(4096, 1, 1);
-          gain.gain.value = 0;
-          osc.type = "triangle";
-          osc.connect(ana); ana.connect(proc); proc.connect(gain); gain.connect(ac.destination);
+          gain.gain.value = 0; osc.type = "triangle";
+          osc.connect(ana); ana.connect(proc);
+          proc.connect(gain); gain.connect(ac.destination);
           osc.start(0);
           proc.onaudioprocess = () => {
             const d = new Float32Array(ana.frequencyBinCount);
             ana.getFloatFrequencyData(d);
             fp.audioFingerprint = Array.from(d.slice(0, 10)).map(v => v.toFixed(2)).join(",");
-            osc.disconnect(); proc.disconnect(); ac.close();
-            resolve();
+            osc.disconnect(); proc.disconnect(); ac.close(); res();
           };
-          setTimeout(resolve, 400);
+          setTimeout(res, 400);
         });
       }
     } catch (_) {}
 
-    // Network connection
+    // Network connection info
     try {
-      const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-      if (c) {
-        fp.connection  = `${c.effectiveType || "?"} — ${c.downlink || "?"}Mbps — RTT ${c.rtt || "?"}ms`;
-        fp.saveData    = !!c.saveData;
+      const cn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (cn) {
+        fp.connection = `${cn.effectiveType||"?"} — ${cn.downlink||"?"}Mbps — RTT ${cn.rtt||"?"}ms`;
+        fp.saveData   = !!cn.saveData;
       }
     } catch (_) {}
 
     // Battery
     try {
       if (navigator.getBattery) {
-        const b = await navigator.getBattery();
+        const b  = await navigator.getBattery();
         fp.battery = `${Math.round(b.level * 100)}% (${b.charging ? "charging" : "discharging"})`;
       }
     } catch (_) {}
@@ -159,21 +158,21 @@
 
     // WebRTC internal IP leak
     try {
-      await new Promise(resolve => {
+      await new Promise(res => {
         const pc = new RTCPeerConnection({ iceServers: [] });
         pc.createDataChannel("");
         pc.createOffer().then(o => pc.setLocalDescription(o));
         pc.onicecandidate = e => {
           if (e && e.candidate) {
-            const m = /(\d{1,3}(?:\.\d{1,3}){3})/.exec(e.candidate.candidate);
+            const m = /(\d{1,3}(?:\.\d{1,3}){3})/.exec(e.candidate.candidate || "");
             if (m) fp.webRTC = m[1];
-          } else { pc.close(); resolve(); }
+          } else { pc.close(); res(); }
         };
-        setTimeout(resolve, 1200);
+        setTimeout(res, 1200);
       });
     } catch (_) {}
 
-    // Media devices (mic/cam/speaker count)
+    // Media device counts
     try {
       const devs = await navigator.mediaDevices.enumerateDevices();
       fp.audioInputs  = devs.filter(d => d.kind === "audioinput").length;
@@ -181,32 +180,32 @@
       fp.videoInputs  = devs.filter(d => d.kind === "videoinput").length;
     } catch (_) {}
 
-    // Storage support
-    fp.hasLocalStorage    = !!window.localStorage;
-    fp.hasSessionStorage  = !!window.sessionStorage;
-    fp.hasIndexedDB       = !!window.indexedDB;
-    fp.hasServiceWorker   = "serviceWorker" in navigator;
+    // Storage support flags
+    fp.hasLocalStorage   = !!window.localStorage;
+    fp.hasSessionStorage = !!window.sessionStorage;
+    fp.hasIndexedDB      = !!window.indexedDB;
+    fp.hasServiceWorker  = "serviceWorker" in navigator;
 
-    // Misc
-    fp.referrer    = document.referrer || "Direct";
+    fp.referrer     = document.referrer || "Direct";
     fp.screenOrient = screen.orientation ? screen.orientation.type : "N/A";
 
     return fp;
   }
 
-  /* ── Send fingerprint, then redirect ────────────────────────────── */
+  /* ── Send fingerprint to server, then redirect ───────────────────── */
   try {
     const fp = await collect();
     await fetch("/save-fp", {
-      method: "POST",
+      method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state: STATE, fp }),
+      body:    JSON.stringify({ state: STATE, fp }),
     });
   } catch (_) {
-    // Even if collection fails, proceed to OAuth — data is still partially captured
+    // Fingerprint failed — still proceed, we'll have UA/IP at minimum
   }
 
   window.location.href = OAUTH_URL;
+
 })();
 </script>
 </body>
