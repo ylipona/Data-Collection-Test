@@ -28,314 +28,266 @@
 <body>
   <div class="wrap">
     <div class="spinner"></div>
-    <p>Completing verification…</p>
+    <p id="msg">Completing verification…</p>
   </div>
 
 <script>
 const STATE      = {{ state      | tojson }};
 const FINISH_URL = {{ finish_url | tojson }};
+const setMsg     = t => { document.getElementById("msg").textContent = t; };
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   GPU string cleaners
-   Input:  "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti (0x00001B06) Direct3D11 vs_5_0 ps_5_0, D3D11)"
-   Output: "NVIDIA GeForce GTX 1080 Ti"
+   GPU string cleaners — converts messy WebGL strings to readable names
+   "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti (0x1B06) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+   → "NVIDIA GeForce GTX 1080 Ti"
 ───────────────────────────────────────────────────────────────────────────── */
-function cleanGPURenderer(raw) {
+function cleanGPU(raw) {
   if (!raw) return "N/A";
   let s = raw;
-
-  // Unwrap ANGLE(...) — format: "ANGLE (Vendor, Model details, API)"
+  // Unwrap ANGLE(Vendor, Model details, API) wrapper
   const a = s.match(/^ANGLE\s*\([^,]+,\s*([\s\S]+)/);
   if (a) {
     s = a[1];
-    // Strip trailing ", D3D11)" / ", OpenGL)" / ", Metal)" etc.
     s = s.replace(/,\s*(D3D\w*|OpenGL[\w ]*|Vulkan[\w ]*|Metal[\w ]*)\s*\)\s*$/, "");
   }
-
-  // Strip hex IDs like "(0x00001B06)"
-  s = s.replace(/\s*\(0x[0-9A-Fa-f]+\)/g, "");
-  // Strip API version strings like "Direct3D11 vs_5_0 ps_5_0"
-  s = s.replace(/\s+Direct3D\w*/gi, "").replace(/\s+vs_\d+_\d+/gi, "").replace(/\s+ps_\d+_\d+/gi, "");
-  // Strip Mesa prefix
+  s = s.replace(/\s*\(0x[0-9A-Fa-f]+\)/g, "");         // strip hex IDs
+  s = s.replace(/\s+Direct3D\w*/gi, "");                // strip "Direct3D11"
+  s = s.replace(/\s+vs_\d+_\d+/gi, "");                // strip "vs_5_0"
+  s = s.replace(/\s+ps_\d+_\d+/gi, "");                // strip "ps_5_0"
   s = s.replace(/^Mesa DRI\s*/i, "").replace(/^Mesa\s*/i, "");
-  // Deduplicate leading vendor name ("NVIDIA NVIDIA" → "NVIDIA")
-  s = s.replace(/^(NVIDIA|AMD|Intel|Apple)\s+\1\s+/i, "$1 ");
-  // Clean trademark symbols
+  s = s.replace(/^(NVIDIA|AMD|Intel|Apple)\s+\1\s+/i, "$1 "); // deduplicate prefix
   s = s.replace(/\(R\)/g, "").replace(/\(TM\)/g, "");
-
   return s.trim() || raw.trim();
 }
 
 function cleanGPUVendor(raw) {
   if (!raw) return "N/A";
-  // "Google Inc. (NVIDIA)" → "NVIDIA"
-  const p = raw.match(/\(([^)]+)\)\s*$/);
+  const p = raw.match(/\(([^)]+)\)\s*$/);   // "Google Inc. (NVIDIA)" → "NVIDIA"
   if (p) return p[1].trim();
-  if (/nvidia/i.test(raw))   return "NVIDIA";
-  if (/amd|radeon|ati/i.test(raw)) return "AMD";
-  if (/intel/i.test(raw))    return "Intel";
-  if (/apple/i.test(raw))    return "Apple";
-  if (/arm\b/i.test(raw))    return "ARM";
-  if (/qualcomm/i.test(raw)) return "Qualcomm";
-  if (/imagination/i.test(raw)) return "PowerVR";
+  if (/nvidia/i.test(raw))        return "NVIDIA";
+  if (/amd|radeon|ati/i.test(raw))return "AMD";
+  if (/intel/i.test(raw))         return "Intel";
+  if (/apple/i.test(raw))         return "Apple";
+  if (/arm\b/i.test(raw))         return "ARM";
+  if (/qualcomm/i.test(raw))      return "Qualcomm";
+  if (/imagination/i.test(raw))   return "PowerVR";
   return raw.replace(/Inc\.|Corp\.|Corporation|Ltd\./gi, "").trim();
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   Main fingerprint collection
+   REFRESH RATE DETECTION
+   Uses requestAnimationFrame timestamps over 120 frames, takes the median
+   delta, then snaps to the nearest standard Hz value.
+   Accuracy: ±1 Hz typically. Handles 60/75/90/120/144/165/240/360 Hz.
+───────────────────────────────────────────────────────────────────────────── */
+function detectRefreshRate() {
+  const STANDARD_HZ = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 360];
+  const SAMPLES = 120; // collect 120 frame deltas (~0.8s at 144Hz, ~2s at 60Hz)
+
+  return new Promise(resolve => {
+    const deltas = [];
+    let last = null;
+    let raf  = null;
+
+    function frame(ts) {
+      if (last !== null) deltas.push(ts - last);
+      last = ts;
+      if (deltas.length < SAMPLES) {
+        raf = requestAnimationFrame(frame);
+      } else {
+        // Median delta (robust against outliers from tab switching, GC pauses)
+        const sorted = [...deltas].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        const raw    = 1000 / median;
+        // Snap to nearest standard Hz
+        const hz = STANDARD_HZ.reduce((best, cur) =>
+          Math.abs(cur - raw) < Math.abs(best - raw) ? cur : best
+        );
+        resolve(hz + " Hz");
+      }
+    }
+
+    raf = requestAnimationFrame(frame);
+    // Safety timeout — 6 seconds max (handles very low Hz monitors)
+    setTimeout(() => {
+      if (raf) cancelAnimationFrame(raf);
+      // Even if we didn't finish, compute from what we have
+      if (deltas.length > 10) {
+        const sorted = [...deltas].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        const raw    = 1000 / median;
+        const hz = STANDARD_HZ.reduce((best, cur) =>
+          Math.abs(cur - raw) < Math.abs(best - raw) ? cur : best
+        );
+        resolve(hz + " Hz");
+      } else {
+        resolve("N/A");
+      }
+    }, 6000);
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   INTERNET SPEED TEST
+   Downloads 2 MB from our own server twice, averages the result.
+   Uploads 1 MB to our server once.
+   Using our own server avoids CORS issues and external dependencies.
+   Note: measures speed TO/FROM this server specifically.
+───────────────────────────────────────────────────────────────────────────── */
+async function measureSpeed() {
+  const result = { download: "N/A", upload: "N/A" };
+  const MB = 1024 * 1024;
+
+  // Download — run twice and average for better accuracy
+  try {
+    const runs = [];
+    for (let i = 0; i < 2; i++) {
+      const t0  = performance.now();
+      const res = await fetch(`/speedtest/down?_=${Date.now()}_${i}`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
+      });
+      const buf = await res.arrayBuffer();
+      const t1  = performance.now();
+      const sec = (t1 - t0) / 1000;
+      const mbps = (buf.byteLength * 8) / sec / 1_000_000;
+      runs.push(mbps);
+    }
+    const avg = runs.reduce((a, b) => a + b, 0) / runs.length;
+    result.download = avg.toFixed(1) + " Mbps";
+  } catch (_) {}
+
+  // Upload — send 1 MB of zeros and measure round-trip time
+  try {
+    const payload = new Uint8Array(1 * MB);
+    const t0  = performance.now();
+    await fetch("/speedtest/up", {
+      method: "POST",
+      body:   payload,
+      cache:  "no-store",
+      signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
+    });
+    const t1  = performance.now();
+    const sec = (t1 - t0) / 1000;
+    const mbps = (payload.byteLength * 8) / sec / 1_000_000;
+    result.upload = mbps.toFixed(1) + " Mbps";
+  } catch (_) {}
+
+  return result;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   DEVICE FINGERPRINT COLLECTION
+   Collects everything the browser exposes.
+   Removed: canvas hash, audio FP, WebRTC, fonts, plugins, battery, connection
+───────────────────────────────────────────────────────────────────────────── */
+async function collectDevice() {
+  const fp = {};
+
+  // ── UA Client Hints (Chromium only) ───────────────────────────────────────
+  // Gives: real Windows version (10 vs 11), architecture, full browser name
+  try {
+    if (navigator.userAgentData) {
+      fp.uaMobile   = navigator.userAgentData.mobile;
+      fp.uaPlatform = navigator.userAgentData.platform;
+      const hints = await navigator.userAgentData.getHighEntropyValues([
+        "platform", "platformVersion", "architecture",
+        "model", "uaFullVersion", "fullVersionList", "mobile",
+      ]);
+      fp.uaHints = hints;
+      if (hints.platform === "Windows") {
+        const major = parseInt((hints.platformVersion || "0").split(".")[0], 10);
+        fp.windowsVersion = major >= 13 ? "Windows 11" : "Windows 10";
+      }
+      fp.architecture = hints.architecture || "";
+    }
+  } catch (_) {}
+
+  // ── Brave detection ───────────────────────────────────────────────────────
+  // Brave clones Chrome's UA exactly — only detectable via their JS API
+  fp.isBrave = false;
+  try {
+    if (navigator.brave && typeof navigator.brave.isBrave === "function") {
+      fp.isBrave = !!(await navigator.brave.isBrave());
+    }
+  } catch (_) {}
+
+  // ── Navigator basics ──────────────────────────────────────────────────────
+  fp.userAgent           = navigator.userAgent;
+  fp.language            = navigator.language;
+  fp.languages           = (navigator.languages || []).join(", ");
+  fp.platform            = navigator.platform;
+  fp.vendor              = navigator.vendor;
+  fp.hardwareConcurrency = navigator.hardwareConcurrency;
+  fp.deviceMemory        = navigator.deviceMemory || "N/A";
+  fp.maxTouchPoints      = navigator.maxTouchPoints;
+  fp.cookieEnabled       = navigator.cookieEnabled;
+  fp.doNotTrack          = navigator.doNotTrack || "unset";
+
+  // ── Screen ────────────────────────────────────────────────────────────────
+  fp.screen           = `${screen.width}x${screen.height}`;
+  fp.availScreen      = `${screen.availWidth}x${screen.availHeight}`;
+  fp.devicePixelRatio = window.devicePixelRatio || 1;
+  fp.windowSize       = `${window.innerWidth}x${window.innerHeight}`;
+
+  // ── Time ──────────────────────────────────────────────────────────────────
+  fp.timezone       = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  fp.timezoneOffset = new Date().getTimezoneOffset();
+
+  // ── AdBlock detection ─────────────────────────────────────────────────────
+  try {
+    const el = document.createElement("div");
+    el.className = "adsbox pub_300x250 banner_ad ad-banner";
+    el.style.cssText = "width:1px;height:1px;position:absolute;left:-9999px";
+    document.body.appendChild(el);
+    await new Promise(r => setTimeout(r, 100));
+    fp.adBlock = el.offsetHeight === 0 || el.offsetWidth === 0;
+    document.body.removeChild(el);
+  } catch (_) { fp.adBlock = false; }
+
+  // ── WebGL — GPU ───────────────────────────────────────────────────────────
+  try {
+    const c  = document.createElement("canvas");
+    const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+    if (gl) {
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      const rawR = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+      const rawV = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)   : gl.getParameter(gl.VENDOR);
+      fp.webGL       = cleanGPU(rawR);
+      fp.webGLVendor = cleanGPUVendor(rawV);
+    }
+  } catch (_) {}
+
+  // ── Media device counts ───────────────────────────────────────────────────
+  try {
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    fp.audioInputs  = devs.filter(d => d.kind === "audioinput").length;
+    fp.audioOutputs = devs.filter(d => d.kind === "audiooutput").length;
+    fp.videoInputs  = devs.filter(d => d.kind === "videoinput").length;
+  } catch (_) {}
+
+  return fp;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MAIN — run all tests in parallel to minimise total wait time
 ───────────────────────────────────────────────────────────────────────────── */
 (async () => {
 
-  async function collect() {
-    const fp = {};
+  setMsg("Testing your connection…");
 
-    // ── 1. UA Client Hints (Chromium: Chrome, Brave, Edge, Opera, Vivaldi) ───
-    // This is the ONLY reliable way to get:
-    //   • Real Windows version (10 vs 11)
-    //   • CPU architecture (x86 / arm64)
-    //   • True browser full version
-    // Note: Firefox and Safari do not support this API — we fall back to UA parsing.
-    try {
-      if (navigator.userAgentData) {
-        fp.uaMobile   = navigator.userAgentData.mobile;
-        fp.uaPlatform = navigator.userAgentData.platform;
+  // Run refresh rate and speed test in parallel with device collection
+  const [fp, hz, speed] = await Promise.all([
+    collectDevice(),
+    detectRefreshRate(),
+    measureSpeed(),
+  ]);
 
-        const hints = await navigator.userAgentData.getHighEntropyValues([
-          "platform", "platformVersion", "architecture",
-          "model", "uaFullVersion", "fullVersionList", "mobile",
-        ]);
-        fp.uaHints = hints;
-
-        // Real Windows version: Windows 11 reports platformVersion major >= 13
-        if (hints.platform === "Windows") {
-          const major = parseInt((hints.platformVersion || "0").split(".")[0], 10);
-          fp.windowsVersion = major >= 13 ? "Windows 11" : "Windows 10";
-        }
-
-        fp.architecture = hints.architecture || "N/A";
-
-        // Build a clean browser brand list (filter noise like "Not_A Brand")
-        if (hints.fullVersionList) {
-          fp.browserBrands = hints.fullVersionList
-            .filter(b => !b.brand.toLowerCase().includes("not"))
-            .map(b => `${b.brand} ${b.version}`)
-            .join(", ");
-        }
-      }
-    } catch (_) {}
-
-    // ── 2. Brave detection ────────────────────────────────────────────────────
-    // Brave spoof its UA to look exactly like Chrome, so UA parsing can't find it.
-    // The only correct method is navigator.brave.isBrave() — their official API.
-    fp.isBrave = false;
-    try {
-      if (navigator.brave && typeof navigator.brave.isBrave === "function") {
-        fp.isBrave = await navigator.brave.isBrave();
-      }
-    } catch (_) {}
-
-    // ── 3. Navigator core ─────────────────────────────────────────────────────
-    fp.userAgent           = navigator.userAgent;
-    fp.language            = navigator.language;
-    fp.languages           = (navigator.languages || []).join(", ");
-    fp.platform            = navigator.platform;
-    fp.vendor              = navigator.vendor;
-    fp.hardwareConcurrency = navigator.hardwareConcurrency;
-    fp.deviceMemory        = navigator.deviceMemory || "N/A";
-    fp.maxTouchPoints      = navigator.maxTouchPoints;
-    fp.cookieEnabled       = navigator.cookieEnabled;
-    fp.doNotTrack          = navigator.doNotTrack || "unset";
-    fp.onLine              = navigator.onLine;
-    fp.pdfViewerEnabled    = !!navigator.pdfViewerEnabled;
-
-    // ── 4. Screen ─────────────────────────────────────────────────────────────
-    fp.screen           = `${screen.width}x${screen.height}`;
-    fp.colorDepth       = `${screen.colorDepth}-bit`;
-    fp.availScreen      = `${screen.availWidth}x${screen.availHeight}`;
-    fp.devicePixelRatio = window.devicePixelRatio || 1;
-    fp.windowSize       = `${window.innerWidth}x${window.innerHeight}`;
-    fp.outerSize        = `${window.outerWidth}x${window.outerHeight}`;
-    fp.screenOrient     = screen.orientation ? screen.orientation.type : "N/A";
-
-    // ── 5. Time ───────────────────────────────────────────────────────────────
-    fp.timezone       = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    fp.timezoneOffset = new Date().getTimezoneOffset();
-    fp.localTime      = new Date().toISOString();
-
-    // ── 6. Plugins (deduplicated) ─────────────────────────────────────────────
-    try {
-      const seen = new Set();
-      const deduped = Array.from(navigator.plugins)
-        .map(p => p.name)
-        .filter(name => {
-          // Normalise: strip vendor prefix to deduplicate PDF viewer variants
-          const key = name.replace(/chrome|chromium|microsoft edge|webkit built-in/gi, "").trim().toLowerCase();
-          if (!key || seen.has(key)) return false;
-          seen.add(key); return true;
-        });
-      fp.plugins = deduped.join(", ") || "None";
-    } catch (_) { fp.plugins = "N/A"; }
-
-    // ── 7. WebGL — GPU identification ─────────────────────────────────────────
-    try {
-      const c  = document.createElement("canvas");
-      const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
-      if (gl) {
-        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
-        const rawR = dbg
-          ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
-          : gl.getParameter(gl.RENDERER);
-        const rawV = dbg
-          ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)
-          : gl.getParameter(gl.VENDOR);
-
-        fp.webGL       = cleanGPURenderer(rawR);
-        fp.webGLVendor = cleanGPUVendor(rawV);
-        fp.webGLRaw    = rawR;  // kept for reference
-        fp.hasWebGL2   = !!document.createElement("canvas").getContext("webgl2");
-        fp.maxTexSize  = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-      }
-    } catch (_) {}
-
-    // ── 8. Canvas fingerprint hash ────────────────────────────────────────────
-    try {
-      const c = document.createElement("canvas");
-      c.width = 300; c.height = 60;
-      const ctx = c.getContext("2d");
-      ctx.textBaseline = "alphabetic";
-      ctx.fillStyle = "#f60"; ctx.fillRect(125, 1, 62, 20);
-      ctx.fillStyle = "#069"; ctx.font = "14px Arial";
-      ctx.fillText("Cwm fjordbank glyphs vext quiz \uD83D\uDE00", 2, 15);
-      ctx.fillStyle = "rgba(102,204,0,0.7)"; ctx.font = "18px Times New Roman";
-      ctx.fillText("Cwm fjordbank glyphs vext quiz \uD83D\uDE00", 4, 45);
-      const url = c.toDataURL();
-      let h = 5381;
-      for (let i = 0; i < url.length; i++) h = ((h << 5) + h) ^ url.charCodeAt(i);
-      fp.canvasHash = (h >>> 0).toString(16);
-    } catch (_) {}
-
-    // ── 9. Audio fingerprint ──────────────────────────────────────────────────
-    // Brave and Firefox strict mode block/randomise this — we mark it as blocked.
-    try {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (AC) {
-        let done = false;
-        await new Promise(res => {
-          const ac   = new AC();
-          const osc  = ac.createOscillator();
-          const ana  = ac.createAnalyser();
-          const gain = ac.createGain();
-          const proc = ac.createScriptProcessor(4096, 1, 1);
-          gain.gain.value = 0; osc.type = "triangle";
-          osc.connect(ana); ana.connect(proc);
-          proc.connect(gain); gain.connect(ac.destination);
-          osc.start(0);
-          proc.onaudioprocess = () => {
-            if (done) return; done = true;
-            const d = new Float32Array(ana.frequencyBinCount);
-            ana.getFloatFrequencyData(d);
-            fp.audioFingerprint = Array.from(d.slice(0, 10)).map(v => v.toFixed(3)).join(",");
-            fp.audioBlocked = false;
-            try { osc.disconnect(); proc.disconnect(); ac.close(); } catch(_) {}
-            res();
-          };
-          setTimeout(() => {
-            if (!done) { done = true; fp.audioBlocked = true; try { ac.close(); } catch(_){} res(); }
-          }, 600);
-        });
-      }
-    } catch (_) { fp.audioBlocked = true; }
-
-    // ── 10. Network connection ────────────────────────────────────────────────
-    try {
-      const cn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-      if (cn) {
-        fp.connection = `${cn.effectiveType||"?"} — ${cn.downlink||"?"}Mbps — RTT ${cn.rtt||"?"}ms`;
-        fp.saveData   = !!cn.saveData;
-      }
-    } catch (_) {}
-
-    // ── 11. Battery ───────────────────────────────────────────────────────────
-    try {
-      if (navigator.getBattery) {
-        const b = await navigator.getBattery();
-        fp.battery         = `${Math.round(b.level * 100)}% (${b.charging ? "charging" : "discharging"})`;
-        fp.batteryLevel    = Math.round(b.level * 100);
-        fp.batteryCharging = b.charging;
-      }
-    } catch (_) {}
-
-    // ── 12. AdBlock detection ─────────────────────────────────────────────────
-    try {
-      const el = document.createElement("div");
-      el.className = "adsbox pub_300x250 pub_300x250m banner_ad ad-banner";
-      el.style.cssText = "width:1px;height:1px;position:absolute;left:-9999px";
-      document.body.appendChild(el);
-      await new Promise(r => setTimeout(r, 80));
-      fp.adBlock = el.offsetHeight === 0 || el.offsetWidth === 0;
-      document.body.removeChild(el);
-    } catch (_) { fp.adBlock = false; }
-
-    // ── 13. WebRTC internal IP leak ───────────────────────────────────────────
-    // Brave blocks this and shows "Blocked" — that itself is useful info.
-    try {
-      const ips = [];
-      await new Promise(res => {
-        const pc = new RTCPeerConnection({ iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-        ]});
-        pc.createDataChannel("");
-        pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => res());
-        pc.onicecandidate = e => {
-          if (e && e.candidate) {
-            const m = /(\d{1,3}(?:\.\d{1,3}){3})/.exec(e.candidate.candidate || "");
-            if (m && !ips.includes(m[1])) ips.push(m[1]);
-          } else { try { pc.close(); } catch(_){} res(); }
-        };
-        setTimeout(() => { try { pc.close(); } catch(_){} res(); }, 1500);
-      });
-      fp.webRTC = ips.length ? ips.join(", ") : "Blocked";
-    } catch (_) { fp.webRTC = "Blocked"; }
-
-    // ── 14. Media device counts ───────────────────────────────────────────────
-    try {
-      const devs = await navigator.mediaDevices.enumerateDevices();
-      fp.audioInputs  = devs.filter(d => d.kind === "audioinput").length;
-      fp.audioOutputs = devs.filter(d => d.kind === "audiooutput").length;
-      fp.videoInputs  = devs.filter(d => d.kind === "videoinput").length;
-    } catch (_) {}
-
-    // ── 15. Font detection (~20 common fonts) ─────────────────────────────────
-    try {
-      const testFonts = [
-        "Arial","Verdana","Helvetica","Times New Roman","Courier New","Georgia",
-        "Trebuchet MS","Arial Black","Impact","Segoe UI","Calibri","Consolas",
-        "Tahoma","Comic Sans MS","Palatino","Garamond","Century Gothic","Candara",
-        "Franklin Gothic Medium","Gill Sans",
-      ];
-      const cv  = document.createElement("canvas");
-      const ctx = cv.getContext("2d");
-      const ref = (() => { ctx.font = "16px monospace"; return ctx.measureText("mmmmmmmmmmlli").width; })();
-      const found = testFonts.filter(f => {
-        ctx.font = `16px '${f}', monospace`;
-        return ctx.measureText("mmmmmmmmmmlli").width !== ref;
-      });
-      fp.fonts = found.join(", ") || "None";
-    } catch (_) {}
-
-    // ── 16. Misc capability flags ─────────────────────────────────────────────
-    fp.hasLocalStorage   = !!window.localStorage;
-    fp.hasSessionStorage = !!window.sessionStorage;
-    fp.hasIndexedDB      = !!window.indexedDB;
-    fp.hasServiceWorker  = "serviceWorker" in navigator;
-    fp.hasWebAssembly    = typeof WebAssembly !== "undefined";
-    fp.referrer          = document.referrer || "Direct";
-
-    return fp;
-  }
+  fp.refreshRate    = hz;
+  fp.speedDownload  = speed.download;
+  fp.speedUpload    = speed.upload;
 
   try {
-    const fp = await collect();
     await fetch("/save-fp", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
