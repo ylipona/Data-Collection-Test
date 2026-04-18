@@ -1,27 +1,33 @@
 """
 bot.py — Discord bot component.
 
-FIX: No longer imports from app.py (that caused a circular import on startup).
-     State tokens are generated here and passed via the URL to /start?state=X.
-     The user ID is retrieved from Discord's OAuth2 response in the callback —
-     we don't need to track state→user_id here.
+FLOW: Bot button links DIRECTLY to Discord OAuth2 (no intermediate page first).
+      After Discord auth, /callback stores the Discord data and redirects to
+      /collect?state=X which silently fingerprints then calls /finish.
 """
 
 import secrets
 import asyncio
+import urllib.parse
 import discord
 from discord.ext import commands
 from discord import ui
 
-from config import BOT_TOKEN, GUILD_ID, VERIFY_CHANNEL_ID, VERIFIED_ROLE_ID, APP_BASE_URL
+from config import BOT_TOKEN, GUILD_ID, VERIFY_CHANNEL_ID, VERIFIED_ROLE_ID, \
+                   CLIENT_ID, REDIRECT_URI, OAUTH2_SCOPES
 
 
-def build_start_url(state: str) -> str:
-    """
-    Link goes to OUR /start page first so fingerprint is collected
-    BEFORE the user ever reaches Discord's OAuth2 screen.
-    """
-    return f"{APP_BASE_URL}/start?state={state}"
+def build_oauth_url(state: str) -> str:
+    """Direct link to Discord OAuth2 — user authorizes first, fingerprint collected after."""
+    params = urllib.parse.urlencode({
+        "client_id":     CLIENT_ID,
+        "redirect_uri":  REDIRECT_URI,
+        "response_type": "code",
+        "scope":         OAUTH2_SCOPES,
+        "state":         state,
+        "prompt":        "consent",
+    })
+    return f"https://discord.com/api/oauth2/authorize?{params}"
 
 
 class VerifyView(ui.View):
@@ -38,14 +44,14 @@ class VerifyView(ui.View):
     )
     async def on_verify(self, interaction: discord.Interaction, button: ui.Button):
         state     = secrets.token_urlsafe(32)
-        start_url = build_start_url(state)
+        oauth_url = build_oauth_url(state)
 
         link_view = ui.View()
         link_view.add_item(
             ui.Button(
                 label="Verify with Discord",
                 style=discord.ButtonStyle.link,
-                url=start_url,
+                url=oauth_url,
                 emoji="🔗",
             )
         )
@@ -56,7 +62,6 @@ class VerifyView(ui.View):
             color=discord.Color.blurple(),
         )
         embed.set_footer(text="If the button stops working, click Verify Now again.")
-
         await interaction.response.send_message(embed=embed, view=link_view, ephemeral=True)
 
 
@@ -85,8 +90,7 @@ class VerificationBot(commands.Bot):
                 title=f"👋  Welcome to {member.guild.name}!",
                 description=(
                     f"Hey {member.mention}!\n\n"
-                    f"Head to <#{VERIFY_CHANNEL_ID}> and click **Verify Now** to unlock the server.\n"
-                    "It only takes a few seconds."
+                    f"Head to <#{VERIFY_CHANNEL_ID}> and click **Verify Now** to unlock the server."
                 ),
                 color=discord.Color.blurple(),
             )
