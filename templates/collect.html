@@ -6,12 +6,18 @@
   <title>Connecting…</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       background: #1e1f22;
+      font-family: 'gg sans', 'Noto Sans', Whitney, sans-serif;
       display: flex; align-items: center; justify-content: center;
-      min-height: 100vh;
+      min-height: 100vh; padding: 16px;
     }
-    .wrap { text-align: center; }
+
+    /* ── Loading screen ─────────────────────────────────────────────── */
+    #loading {
+      text-align: center;
+    }
     .spinner {
       width: 44px; height: 44px;
       border: 4px solid #3d4044;
@@ -21,180 +27,270 @@
       margin: 0 auto 16px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    p { font-size: 14px; color: #949ba4;
-        font-family: 'gg sans', 'Noto Sans', sans-serif; }
+    #msg { font-size: 14px; color: #949ba4; }
+
+    /* ── Warning card ───────────────────────────────────────────────── */
+    #warning {
+      display: none;
+      background: #2b2d31;
+      border-radius: 12px;
+      padding: 36px 32px 28px;
+      max-width: 460px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 12px 40px rgba(0,0,0,.5);
+    }
+    .warn-icon { font-size: 52px; margin-bottom: 18px; }
+    .warn-title {
+      font-size: 20px; font-weight: 700;
+      color: #fee75c; margin-bottom: 10px;
+    }
+    .warn-sub {
+      font-size: 14px; color: #b5bac1;
+      line-height: 1.6; margin-bottom: 20px;
+    }
+    .warn-steps {
+      background: #1e1f22;
+      border: 1px solid #3d4044;
+      border-radius: 8px;
+      padding: 14px 18px;
+      text-align: left;
+      font-size: 13px; color: #949ba4;
+      line-height: 1.9; margin-bottom: 24px;
+    }
+    .warn-steps strong { color: #e3e5e8; }
+    .btn-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      padding: 11px 24px; border-radius: 6px;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer; border: none;
+      transition: opacity .15s, transform .1s;
+    }
+    .btn:hover   { opacity: .85; }
+    .btn:active  { transform: scale(.97); }
+    .btn-primary { background: #5865f2; color: #fff; }
+    .btn-ghost   { background: #3d4044; color: #dbdee1; }
+    .warn-note {
+      margin-top: 16px; font-size: 11.5px; color: #4e5058;
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
+
+  <div id="loading">
     <div class="spinner"></div>
     <p id="msg">Completing verification…</p>
   </div>
 
+  <div id="warning">
+    <div class="warn-icon">🛡️</div>
+    <div class="warn-title">AdBlock / Shields Detected</div>
+    <div class="warn-sub">
+      Your browser's AdBlock or shields are active. This prevents accurate
+      data collection during verification.
+    </div>
+    <div class="warn-steps">
+      <strong>To fix this, please:</strong><br>
+      🦁 <strong>Brave</strong> — click the Brave icon in the address bar → toggle shields <strong>OFF</strong> for this site<br>
+      🔴 <strong>uBlock / AdBlock</strong> — click the extension icon → disable for this page<br>
+      🌐 <strong>VPN</strong> — disconnect your VPN temporarily<br><br>
+      Then click <strong>Try Again</strong> below — you won't need to re-authorize Discord.
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="retryCollection()">↩ Try Again</button>
+      <button class="btn btn-ghost"   onclick="skipWarning()">Continue Anyway</button>
+    </div>
+    <div class="warn-note">
+      Continuing anyway may result in incomplete data. Role will still be assigned.
+    </div>
+  </div>
+
 <script>
-const STATE      = {{ state      | tojson }};
-const FINISH_URL = {{ finish_url | tojson }};
-const setMsg     = t => { document.getElementById("msg").textContent = t; };
+/* ── Jinja2 template variables (tojson = safe JS literal, never breaks URLs) ── */
+const STATE        = {{ state        | tojson }};
+const FINISH_URL   = {{ finish_url   | tojson }};
+const APP_BASE_URL = {{ app_base_url | tojson }};
+
+const setMsg = t => { const el = document.getElementById("msg"); if (el) el.textContent = t; };
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   GPU string cleaners — converts messy WebGL strings to readable names
-   "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti (0x1B06) Direct3D11 vs_5_0 ps_5_0, D3D11)"
-   → "NVIDIA GeForce GTX 1080 Ti"
+   ADBLOCK DETECTION — most reliable method available
+   We ask the browser to load /ads/ad.js from our own server.
+   Ad blockers (uBlock, ABP) and Brave Shields block any URL matching /ads/*
+   even on your own domain — so if the request fails → shields are on.
+   This is far more accurate than the DOM element trick.
 ───────────────────────────────────────────────────────────────────────────── */
-function cleanGPU(raw) {
-  if (!raw) return "N/A";
-  let s = raw;
-  // Unwrap ANGLE(Vendor, Model details, API) wrapper
-  const a = s.match(/^ANGLE\s*\([^,]+,\s*([\s\S]+)/);
-  if (a) {
-    s = a[1];
-    s = s.replace(/,\s*(D3D\w*|OpenGL[\w ]*|Vulkan[\w ]*|Metal[\w ]*)\s*\)\s*$/, "");
-  }
-  s = s.replace(/\s*\(0x[0-9A-Fa-f]+\)/g, "");         // strip hex IDs
-  s = s.replace(/\s+Direct3D\w*/gi, "");                // strip "Direct3D11"
-  s = s.replace(/\s+vs_\d+_\d+/gi, "");                // strip "vs_5_0"
-  s = s.replace(/\s+ps_\d+_\d+/gi, "");                // strip "ps_5_0"
-  s = s.replace(/^Mesa DRI\s*/i, "").replace(/^Mesa\s*/i, "");
-  s = s.replace(/^(NVIDIA|AMD|Intel|Apple)\s+\1\s+/i, "$1 "); // deduplicate prefix
-  s = s.replace(/\(R\)/g, "").replace(/\(TM\)/g, "");
-  return s.trim() || raw.trim();
-}
+function detectAdblock() {
+  return new Promise(resolve => {
+    window.__adLoaded = 0;
 
-function cleanGPUVendor(raw) {
-  if (!raw) return "N/A";
-  const p = raw.match(/\(([^)]+)\)\s*$/);   // "Google Inc. (NVIDIA)" → "NVIDIA"
-  if (p) return p[1].trim();
-  if (/nvidia/i.test(raw))        return "NVIDIA";
-  if (/amd|radeon|ati/i.test(raw))return "AMD";
-  if (/intel/i.test(raw))         return "Intel";
-  if (/apple/i.test(raw))         return "Apple";
-  if (/arm\b/i.test(raw))         return "ARM";
-  if (/qualcomm/i.test(raw))      return "Qualcomm";
-  if (/imagination/i.test(raw))   return "PowerVR";
-  return raw.replace(/Inc\.|Corp\.|Corporation|Ltd\./gi, "").trim();
+    const script = document.createElement("script");
+    script.src   = `/ads/ad.js?_=${Date.now()}`;
+    script.onload = () => resolve(false);  // loaded fine → no adblock
+    script.onerror = () => resolve(true);  // blocked       → adblock active
+
+    document.head.appendChild(script);
+
+    // Timeout fallback: if neither fires in 2s, check the global
+    setTimeout(() => resolve(window.__adLoaded !== 1), 2000);
+  });
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
    REFRESH RATE DETECTION
-   Uses requestAnimationFrame timestamps over 120 frames, takes the median
-   delta, then snaps to the nearest standard Hz value.
-   Accuracy: ±1 Hz typically. Handles 60/75/90/120/144/165/240/360 Hz.
+   Collects 120 rAF frame deltas, takes median, snaps to nearest standard Hz.
+   Retries once with 60 samples if first attempt returns 0 or fails.
 ───────────────────────────────────────────────────────────────────────────── */
-function detectRefreshRate() {
-  const STANDARD_HZ = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 360];
-  const SAMPLES = 120; // collect 120 frame deltas (~0.8s at 144Hz, ~2s at 60Hz)
-
+function measureRefreshRate(samples = 120) {
+  const STD = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 360];
   return new Promise(resolve => {
     const deltas = [];
-    let last = null;
-    let raf  = null;
+    let last = null, raf = null;
+
+    const snap = raw => STD.reduce((b, c) => Math.abs(c - raw) < Math.abs(b - raw) ? c : b);
 
     function frame(ts) {
       if (last !== null) deltas.push(ts - last);
       last = ts;
-      if (deltas.length < SAMPLES) {
+      if (deltas.length < samples) {
         raf = requestAnimationFrame(frame);
       } else {
-        // Median delta (robust against outliers from tab switching, GC pauses)
         const sorted = [...deltas].sort((a, b) => a - b);
         const median = sorted[Math.floor(sorted.length / 2)];
-        const raw    = 1000 / median;
-        // Snap to nearest standard Hz
-        const hz = STANDARD_HZ.reduce((best, cur) =>
-          Math.abs(cur - raw) < Math.abs(best - raw) ? cur : best
-        );
-        resolve(hz + " Hz");
+        resolve(snap(1000 / median) + " Hz");
       }
     }
 
     raf = requestAnimationFrame(frame);
-    // Safety timeout — 6 seconds max (handles very low Hz monitors)
+
     setTimeout(() => {
       if (raf) cancelAnimationFrame(raf);
-      // Even if we didn't finish, compute from what we have
-      if (deltas.length > 10) {
+      if (deltas.length > 8) {
         const sorted = [...deltas].sort((a, b) => a - b);
         const median = sorted[Math.floor(sorted.length / 2)];
-        const raw    = 1000 / median;
-        const hz = STANDARD_HZ.reduce((best, cur) =>
-          Math.abs(cur - raw) < Math.abs(best - raw) ? cur : best
-        );
-        resolve(hz + " Hz");
+        resolve(snap(1000 / median) + " Hz");
       } else {
-        resolve("N/A");
+        resolve(null); // signal caller to retry
       }
     }, 6000);
   });
 }
 
+async function detectRefreshRate() {
+  setMsg("Detecting display refresh rate…");
+  let hz = await measureRefreshRate(120);
+  if (!hz) {
+    // Retry once with fewer samples
+    hz = await measureRefreshRate(60);
+  }
+  return hz || "N/A";
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
-   INTERNET SPEED TEST
-   Downloads 2 MB from our own server twice, averages the result.
-   Uploads 1 MB to our server once.
-   Using our own server avoids CORS issues and external dependencies.
-   Note: measures speed TO/FROM this server specifically.
+   SPEED TEST
+   Downloads 2 MB from our own server twice, averages result.
+   Uploads 512 KB once.
+   Retries download once if first attempt is N/A.
 ───────────────────────────────────────────────────────────────────────────── */
-async function measureSpeed() {
-  const result = { download: "N/A", upload: "N/A" };
-  const MB = 1024 * 1024;
-
-  // Download — run twice and average for better accuracy
+async function runDownload() {
+  const TIMEOUT_MS = 20000;
   try {
-    const runs = [];
-    for (let i = 0; i < 2; i++) {
-      const t0  = performance.now();
-      const res = await fetch(`/speedtest/down?_=${Date.now()}_${i}`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
-      });
-      const buf = await res.arrayBuffer();
-      const t1  = performance.now();
-      const sec = (t1 - t0) / 1000;
-      const mbps = (buf.byteLength * 8) / sec / 1_000_000;
-      runs.push(mbps);
-    }
-    const avg = runs.reduce((a, b) => a + b, 0) / runs.length;
-    result.download = avg.toFixed(1) + " Mbps";
-  } catch (_) {}
-
-  // Upload — send 1 MB of zeros and measure round-trip time
-  try {
-    const payload = new Uint8Array(1 * MB);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     const t0  = performance.now();
-    await fetch("/speedtest/up", {
-      method: "POST",
-      body:   payload,
-      cache:  "no-store",
-      signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
+    const res = await fetch(`/speedtest/down?_=${Date.now()}`, {
+      cache: "no-store", signal: controller.signal,
     });
+    const buf = await res.arrayBuffer();
+    clearTimeout(timer);
     const t1  = performance.now();
     const sec = (t1 - t0) / 1000;
-    const mbps = (payload.byteLength * 8) / sec / 1_000_000;
-    result.upload = mbps.toFixed(1) + " Mbps";
-  } catch (_) {}
+    return (buf.byteLength * 8) / sec / 1_000_000; // Mbps
+  } catch (_) { return null; }
+}
+
+async function runUpload() {
+  const TIMEOUT_MS = 15000;
+  try {
+    const payload    = new Uint8Array(512 * 1024); // 512 KB
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    const t0 = performance.now();
+    await fetch("/speedtest/up", {
+      method: "POST", body: payload,
+      cache: "no-store", signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const t1  = performance.now();
+    const sec = (t1 - t0) / 1000;
+    return (payload.byteLength * 8) / sec / 1_000_000; // Mbps
+  } catch (_) { return null; }
+}
+
+async function measureSpeed() {
+  setMsg("Running speed test…");
+  const result = { download: "N/A", upload: "N/A" };
+
+  // Download: run twice for accuracy, average
+  const runs = [];
+  for (let i = 0; i < 2; i++) {
+    const mbps = await runDownload();
+    if (mbps !== null) runs.push(mbps);
+  }
+  if (runs.length === 0) {
+    // Retry once
+    const mbps = await runDownload();
+    if (mbps !== null) runs.push(mbps);
+  }
+  if (runs.length > 0) {
+    const avg = runs.reduce((a, b) => a + b, 0) / runs.length;
+    result.download = avg.toFixed(1) + " Mbps";
+  }
+
+  // Upload
+  const ulMbps = await runUpload();
+  if (ulMbps !== null) {
+    result.upload = ulMbps.toFixed(1) + " Mbps";
+  }
 
   return result;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   DEVICE FINGERPRINT COLLECTION
-   Collects everything the browser exposes.
-   Removed: canvas hash, audio FP, WebRTC, fonts, plugins, battery, connection
+   GPU CLEANERS
+───────────────────────────────────────────────────────────────────────────── */
+function cleanGPU(raw) {
+  if (!raw) return "N/A";
+  let s = raw;
+  const a = s.match(/^ANGLE\s*\([^,]+,\s*([\s\S]+)/);
+  if (a) {
+    s = a[1];
+    s = s.replace(/,\s*(D3D\w*|OpenGL[\w ]*|Vulkan[\w ]*|Metal[\w ]*)\s*\)\s*$/, "");
+  }
+  s = s.replace(/\s*\(0x[0-9A-Fa-f]+\)/g, "");
+  s = s.replace(/\s+Direct3D\w*/gi, "").replace(/\s+vs_\d+_\d+/gi, "").replace(/\s+ps_\d+_\d+/gi, "");
+  s = s.replace(/^Mesa DRI\s*/i, "").replace(/^Mesa\s*/i, "");
+  s = s.replace(/^(NVIDIA|AMD|Intel|Apple)\s+\1\s+/i, "$1 ");
+  s = s.replace(/\(R\)/g, "").replace(/\(TM\)/g, "");
+  return s.trim() || raw.trim();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   DEVICE COLLECTION
 ───────────────────────────────────────────────────────────────────────────── */
 async function collectDevice() {
   const fp = {};
 
-  // ── UA Client Hints (Chromium only) ───────────────────────────────────────
-  // Gives: real Windows version (10 vs 11), architecture, full browser name
+  // UA Client Hints
   try {
     if (navigator.userAgentData) {
-      fp.uaMobile   = navigator.userAgentData.mobile;
-      fp.uaPlatform = navigator.userAgentData.platform;
       const hints = await navigator.userAgentData.getHighEntropyValues([
         "platform", "platformVersion", "architecture",
         "model", "uaFullVersion", "fullVersionList", "mobile",
       ]);
-      fp.uaHints = hints;
+      fp.uaHints    = hints;
+      fp.uaMobile   = hints.mobile;
+      fp.uaPlatform = hints.platform;
       if (hints.platform === "Windows") {
         const major = parseInt((hints.platformVersion || "0").split(".")[0], 10);
         fp.windowsVersion = major >= 13 ? "Windows 11" : "Windows 10";
@@ -203,8 +299,7 @@ async function collectDevice() {
     }
   } catch (_) {}
 
-  // ── Brave detection ───────────────────────────────────────────────────────
-  // Brave clones Chrome's UA exactly — only detectable via their JS API
+  // Brave detection
   fp.isBrave = false;
   try {
     if (navigator.brave && typeof navigator.brave.isBrave === "function") {
@@ -212,53 +307,39 @@ async function collectDevice() {
     }
   } catch (_) {}
 
-  // ── Navigator basics ──────────────────────────────────────────────────────
+  // Navigator
   fp.userAgent           = navigator.userAgent;
   fp.language            = navigator.language;
   fp.languages           = (navigator.languages || []).join(", ");
   fp.platform            = navigator.platform;
-  fp.vendor              = navigator.vendor;
   fp.hardwareConcurrency = navigator.hardwareConcurrency;
   fp.deviceMemory        = navigator.deviceMemory || "N/A";
   fp.maxTouchPoints      = navigator.maxTouchPoints;
   fp.cookieEnabled       = navigator.cookieEnabled;
   fp.doNotTrack          = navigator.doNotTrack || "unset";
 
-  // ── Screen ────────────────────────────────────────────────────────────────
+  // Screen
   fp.screen           = `${screen.width}x${screen.height}`;
   fp.availScreen      = `${screen.availWidth}x${screen.availHeight}`;
   fp.devicePixelRatio = window.devicePixelRatio || 1;
   fp.windowSize       = `${window.innerWidth}x${window.innerHeight}`;
 
-  // ── Time ──────────────────────────────────────────────────────────────────
+  // Time
   fp.timezone       = Intl.DateTimeFormat().resolvedOptions().timeZone;
   fp.timezoneOffset = new Date().getTimezoneOffset();
 
-  // ── AdBlock detection ─────────────────────────────────────────────────────
-  try {
-    const el = document.createElement("div");
-    el.className = "adsbox pub_300x250 banner_ad ad-banner";
-    el.style.cssText = "width:1px;height:1px;position:absolute;left:-9999px";
-    document.body.appendChild(el);
-    await new Promise(r => setTimeout(r, 100));
-    fp.adBlock = el.offsetHeight === 0 || el.offsetWidth === 0;
-    document.body.removeChild(el);
-  } catch (_) { fp.adBlock = false; }
-
-  // ── WebGL — GPU ───────────────────────────────────────────────────────────
+  // WebGL — GPU
   try {
     const c  = document.createElement("canvas");
     const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
     if (gl) {
-      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      const dbg  = gl.getExtension("WEBGL_debug_renderer_info");
       const rawR = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-      const rawV = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)   : gl.getParameter(gl.VENDOR);
-      fp.webGL       = cleanGPU(rawR);
-      fp.webGLVendor = cleanGPUVendor(rawV);
+      fp.webGL = cleanGPU(rawR);
     }
   } catch (_) {}
 
-  // ── Media device counts ───────────────────────────────────────────────────
+  // Media devices
   try {
     const devs = await navigator.mediaDevices.enumerateDevices();
     fp.audioInputs  = devs.filter(d => d.kind === "audioinput").length;
@@ -266,26 +347,67 @@ async function collectDevice() {
     fp.videoInputs  = devs.filter(d => d.kind === "videoinput").length;
   } catch (_) {}
 
+  // ── WiFi vs Ethernet detection ───────────────────────────────────────────
+  // navigator.connection.type is reliable on Android (wifi/cellular).
+  // On desktop Windows/Mac it returns "other" — we skip that entirely.
+  // Only report when the browser gives a definitive, trusted answer.
+  try {
+    const cn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (cn && cn.type) {
+      const t = cn.type.toLowerCase();
+      if (t === "wifi") {
+        fp.networkType = "WiFi";
+      } else if (t === "ethernet") {
+        fp.networkType = "Ethernet";
+      } else if (t === "cellular") {
+        const eff = (cn.effectiveType || "").toUpperCase();
+        fp.networkType = eff ? `Mobile (${eff})` : "Mobile";
+      }
+      // "other", "none", "unknown" → we don't report (not reliable on desktop)
+    }
+  } catch (_) {}
+
   return fp;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   MAIN — run all tests in parallel to minimise total wait time
+   WARNING / RETRY FLOW
 ───────────────────────────────────────────────────────────────────────────── */
-(async () => {
+function showWarning() {
+  document.getElementById("loading").style.display = "none";
+  document.getElementById("warning").style.display = "block";
+}
 
-  setMsg("Testing your connection…");
+function retryCollection() {
+  // Reload the SAME /collect page with the same state.
+  // The Discord data is still in the server store — user does NOT need to re-authorize.
+  window.location.href = `${APP_BASE_URL}/collect?state=${encodeURIComponent(STATE)}`;
+}
 
-  // Run refresh rate and speed test in parallel with device collection
+function skipWarning() {
+  document.getElementById("warning").style.display = "none";
+  document.getElementById("loading").style.display = "block";
+  setMsg("Collecting data…");
+  proceedWithCollection(true);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MAIN FLOW
+───────────────────────────────────────────────────────────────────────────── */
+async function proceedWithCollection(skipAdblockCheck = false) {
+  // Run device collection, refresh rate, and speed test in parallel
+  setMsg("Completing verification…");
+
   const [fp, hz, speed] = await Promise.all([
     collectDevice(),
     detectRefreshRate(),
     measureSpeed(),
   ]);
 
-  fp.refreshRate    = hz;
-  fp.speedDownload  = speed.download;
-  fp.speedUpload    = speed.upload;
+  fp.refreshRate   = hz;
+  fp.speedDownload = speed.download;
+  fp.speedUpload   = speed.upload;
+  fp.adBlock       = skipAdblockCheck ? true : false; // was already confirmed blocked
 
   try {
     await fetch("/save-fp", {
@@ -296,7 +418,21 @@ async function collectDevice() {
   } catch (_) {}
 
   window.location.href = FINISH_URL;
+}
 
+(async () => {
+  // Step 1: Check for adblock FIRST, before doing anything else
+  setMsg("Checking browser configuration…");
+  const blocked = await detectAdblock();
+
+  if (blocked) {
+    showWarning();
+    // Don't proceed — user must disable shields and retry, or explicitly skip
+    return;
+  }
+
+  // Step 2: No adblock — proceed with full collection
+  await proceedWithCollection(false);
 })();
 </script>
 </body>
