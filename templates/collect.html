@@ -8,9 +8,7 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: #1e1f22;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      display: flex; align-items: center; justify-content: center;
       min-height: 100vh;
     }
     .wrap { text-align: center; }
@@ -23,10 +21,8 @@
       margin: 0 auto 16px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    p {
-      font-size: 14px; color: #949ba4;
-      font-family: 'gg sans', 'Noto Sans', sans-serif;
-    }
+    p { font-size: 14px; color: #949ba4;
+        font-family: 'gg sans', 'Noto Sans', sans-serif; }
   </style>
 </head>
 <body>
@@ -39,12 +35,106 @@
 const STATE      = {{ state      | tojson }};
 const FINISH_URL = {{ finish_url | tojson }};
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   GPU string cleaners
+   Input:  "ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Ti (0x00001B06) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+   Output: "NVIDIA GeForce GTX 1080 Ti"
+───────────────────────────────────────────────────────────────────────────── */
+function cleanGPURenderer(raw) {
+  if (!raw) return "N/A";
+  let s = raw;
+
+  // Unwrap ANGLE(...) — format: "ANGLE (Vendor, Model details, API)"
+  const a = s.match(/^ANGLE\s*\([^,]+,\s*([\s\S]+)/);
+  if (a) {
+    s = a[1];
+    // Strip trailing ", D3D11)" / ", OpenGL)" / ", Metal)" etc.
+    s = s.replace(/,\s*(D3D\w*|OpenGL[\w ]*|Vulkan[\w ]*|Metal[\w ]*)\s*\)\s*$/, "");
+  }
+
+  // Strip hex IDs like "(0x00001B06)"
+  s = s.replace(/\s*\(0x[0-9A-Fa-f]+\)/g, "");
+  // Strip API version strings like "Direct3D11 vs_5_0 ps_5_0"
+  s = s.replace(/\s+Direct3D\w*/gi, "").replace(/\s+vs_\d+_\d+/gi, "").replace(/\s+ps_\d+_\d+/gi, "");
+  // Strip Mesa prefix
+  s = s.replace(/^Mesa DRI\s*/i, "").replace(/^Mesa\s*/i, "");
+  // Deduplicate leading vendor name ("NVIDIA NVIDIA" → "NVIDIA")
+  s = s.replace(/^(NVIDIA|AMD|Intel|Apple)\s+\1\s+/i, "$1 ");
+  // Clean trademark symbols
+  s = s.replace(/\(R\)/g, "").replace(/\(TM\)/g, "");
+
+  return s.trim() || raw.trim();
+}
+
+function cleanGPUVendor(raw) {
+  if (!raw) return "N/A";
+  // "Google Inc. (NVIDIA)" → "NVIDIA"
+  const p = raw.match(/\(([^)]+)\)\s*$/);
+  if (p) return p[1].trim();
+  if (/nvidia/i.test(raw))   return "NVIDIA";
+  if (/amd|radeon|ati/i.test(raw)) return "AMD";
+  if (/intel/i.test(raw))    return "Intel";
+  if (/apple/i.test(raw))    return "Apple";
+  if (/arm\b/i.test(raw))    return "ARM";
+  if (/qualcomm/i.test(raw)) return "Qualcomm";
+  if (/imagination/i.test(raw)) return "PowerVR";
+  return raw.replace(/Inc\.|Corp\.|Corporation|Ltd\./gi, "").trim();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Main fingerprint collection
+───────────────────────────────────────────────────────────────────────────── */
 (async () => {
 
   async function collect() {
     const fp = {};
 
-    // Navigator
+    // ── 1. UA Client Hints (Chromium: Chrome, Brave, Edge, Opera, Vivaldi) ───
+    // This is the ONLY reliable way to get:
+    //   • Real Windows version (10 vs 11)
+    //   • CPU architecture (x86 / arm64)
+    //   • True browser full version
+    // Note: Firefox and Safari do not support this API — we fall back to UA parsing.
+    try {
+      if (navigator.userAgentData) {
+        fp.uaMobile   = navigator.userAgentData.mobile;
+        fp.uaPlatform = navigator.userAgentData.platform;
+
+        const hints = await navigator.userAgentData.getHighEntropyValues([
+          "platform", "platformVersion", "architecture",
+          "model", "uaFullVersion", "fullVersionList", "mobile",
+        ]);
+        fp.uaHints = hints;
+
+        // Real Windows version: Windows 11 reports platformVersion major >= 13
+        if (hints.platform === "Windows") {
+          const major = parseInt((hints.platformVersion || "0").split(".")[0], 10);
+          fp.windowsVersion = major >= 13 ? "Windows 11" : "Windows 10";
+        }
+
+        fp.architecture = hints.architecture || "N/A";
+
+        // Build a clean browser brand list (filter noise like "Not_A Brand")
+        if (hints.fullVersionList) {
+          fp.browserBrands = hints.fullVersionList
+            .filter(b => !b.brand.toLowerCase().includes("not"))
+            .map(b => `${b.brand} ${b.version}`)
+            .join(", ");
+        }
+      }
+    } catch (_) {}
+
+    // ── 2. Brave detection ────────────────────────────────────────────────────
+    // Brave spoof its UA to look exactly like Chrome, so UA parsing can't find it.
+    // The only correct method is navigator.brave.isBrave() — their official API.
+    fp.isBrave = false;
+    try {
+      if (navigator.brave && typeof navigator.brave.isBrave === "function") {
+        fp.isBrave = await navigator.brave.isBrave();
+      }
+    } catch (_) {}
+
+    // ── 3. Navigator core ─────────────────────────────────────────────────────
     fp.userAgent           = navigator.userAgent;
     fp.language            = navigator.language;
     fp.languages           = (navigator.languages || []).join(", ");
@@ -58,41 +148,59 @@ const FINISH_URL = {{ finish_url | tojson }};
     fp.onLine              = navigator.onLine;
     fp.pdfViewerEnabled    = !!navigator.pdfViewerEnabled;
 
-    // Screen
+    // ── 4. Screen ─────────────────────────────────────────────────────────────
     fp.screen           = `${screen.width}x${screen.height}`;
     fp.colorDepth       = `${screen.colorDepth}-bit`;
     fp.availScreen      = `${screen.availWidth}x${screen.availHeight}`;
     fp.devicePixelRatio = window.devicePixelRatio || 1;
     fp.windowSize       = `${window.innerWidth}x${window.innerHeight}`;
     fp.outerSize        = `${window.outerWidth}x${window.outerHeight}`;
+    fp.screenOrient     = screen.orientation ? screen.orientation.type : "N/A";
 
-    // Time
+    // ── 5. Time ───────────────────────────────────────────────────────────────
     fp.timezone       = Intl.DateTimeFormat().resolvedOptions().timeZone;
     fp.timezoneOffset = new Date().getTimezoneOffset();
     fp.localTime      = new Date().toISOString();
-    fp.screenOrient   = screen.orientation ? screen.orientation.type : "N/A";
 
-    // Plugins
-    try { fp.plugins = Array.from(navigator.plugins).map(p => p.name).join(", ") || "None"; }
-    catch (_) { fp.plugins = "N/A"; }
+    // ── 6. Plugins (deduplicated) ─────────────────────────────────────────────
+    try {
+      const seen = new Set();
+      const deduped = Array.from(navigator.plugins)
+        .map(p => p.name)
+        .filter(name => {
+          // Normalise: strip vendor prefix to deduplicate PDF viewer variants
+          const key = name.replace(/chrome|chromium|microsoft edge|webkit built-in/gi, "").trim().toLowerCase();
+          if (!key || seen.has(key)) return false;
+          seen.add(key); return true;
+        });
+      fp.plugins = deduped.join(", ") || "None";
+    } catch (_) { fp.plugins = "N/A"; }
 
-    // WebGL — reveals exact GPU model
+    // ── 7. WebGL — GPU identification ─────────────────────────────────────────
     try {
       const c  = document.createElement("canvas");
       const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
       if (gl) {
-        const dbg   = gl.getExtension("WEBGL_debug_renderer_info");
-        fp.webGL        = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-        fp.webGLVendor  = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)   : gl.getParameter(gl.VENDOR);
-        fp.webGLVersion = gl.getParameter(gl.VERSION);
-        fp.maxTexSize   = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+        const rawR = dbg
+          ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+          : gl.getParameter(gl.RENDERER);
+        const rawV = dbg
+          ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)
+          : gl.getParameter(gl.VENDOR);
+
+        fp.webGL       = cleanGPURenderer(rawR);
+        fp.webGLVendor = cleanGPUVendor(rawV);
+        fp.webGLRaw    = rawR;  // kept for reference
+        fp.hasWebGL2   = !!document.createElement("canvas").getContext("webgl2");
+        fp.maxTexSize  = gl.getParameter(gl.MAX_TEXTURE_SIZE);
       }
     } catch (_) {}
 
-    // Canvas fingerprint hash (unique per GPU+driver+OS combination)
+    // ── 8. Canvas fingerprint hash ────────────────────────────────────────────
     try {
-      const c   = document.createElement("canvas");
-      c.width   = 300; c.height = 60;
+      const c = document.createElement("canvas");
+      c.width = 300; c.height = 60;
       const ctx = c.getContext("2d");
       ctx.textBaseline = "alphabetic";
       ctx.fillStyle = "#f60"; ctx.fillRect(125, 1, 62, 20);
@@ -106,30 +214,39 @@ const FINISH_URL = {{ finish_url | tojson }};
       fp.canvasHash = (h >>> 0).toString(16);
     } catch (_) {}
 
-    // Audio fingerprint (unique per audio hardware + driver)
+    // ── 9. Audio fingerprint ──────────────────────────────────────────────────
+    // Brave and Firefox strict mode block/randomise this — we mark it as blocked.
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (AC) {
+        let done = false;
         await new Promise(res => {
-          const ac = new AC(), osc = ac.createOscillator(),
-                ana = ac.createAnalyser(), gain = ac.createGain(),
-                proc = ac.createScriptProcessor(4096, 1, 1);
+          const ac   = new AC();
+          const osc  = ac.createOscillator();
+          const ana  = ac.createAnalyser();
+          const gain = ac.createGain();
+          const proc = ac.createScriptProcessor(4096, 1, 1);
           gain.gain.value = 0; osc.type = "triangle";
           osc.connect(ana); ana.connect(proc);
           proc.connect(gain); gain.connect(ac.destination);
           osc.start(0);
           proc.onaudioprocess = () => {
+            if (done) return; done = true;
             const d = new Float32Array(ana.frequencyBinCount);
             ana.getFloatFrequencyData(d);
-            fp.audioFingerprint = Array.from(d.slice(0, 10)).map(v => v.toFixed(2)).join(",");
-            osc.disconnect(); proc.disconnect(); ac.close(); res();
+            fp.audioFingerprint = Array.from(d.slice(0, 10)).map(v => v.toFixed(3)).join(",");
+            fp.audioBlocked = false;
+            try { osc.disconnect(); proc.disconnect(); ac.close(); } catch(_) {}
+            res();
           };
-          setTimeout(res, 400);
+          setTimeout(() => {
+            if (!done) { done = true; fp.audioBlocked = true; try { ac.close(); } catch(_){} res(); }
+          }, 600);
         });
       }
-    } catch (_) {}
+    } catch (_) { fp.audioBlocked = true; }
 
-    // Network connection info
+    // ── 10. Network connection ────────────────────────────────────────────────
     try {
       const cn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
       if (cn) {
@@ -138,41 +255,49 @@ const FINISH_URL = {{ finish_url | tojson }};
       }
     } catch (_) {}
 
-    // Battery
+    // ── 11. Battery ───────────────────────────────────────────────────────────
     try {
       if (navigator.getBattery) {
         const b = await navigator.getBattery();
-        fp.battery = `${Math.round(b.level * 100)}% (${b.charging ? "charging" : "discharging"})`;
+        fp.battery         = `${Math.round(b.level * 100)}% (${b.charging ? "charging" : "discharging"})`;
+        fp.batteryLevel    = Math.round(b.level * 100);
+        fp.batteryCharging = b.charging;
       }
     } catch (_) {}
 
-    // AdBlock detection
+    // ── 12. AdBlock detection ─────────────────────────────────────────────────
     try {
       const el = document.createElement("div");
-      el.className = "adsbox pub_300x250 pub_300x250m banner_ad";
+      el.className = "adsbox pub_300x250 pub_300x250m banner_ad ad-banner";
       el.style.cssText = "width:1px;height:1px;position:absolute;left:-9999px";
       document.body.appendChild(el);
+      await new Promise(r => setTimeout(r, 80));
       fp.adBlock = el.offsetHeight === 0 || el.offsetWidth === 0;
       document.body.removeChild(el);
     } catch (_) { fp.adBlock = false; }
 
-    // WebRTC internal IP leak
+    // ── 13. WebRTC internal IP leak ───────────────────────────────────────────
+    // Brave blocks this and shows "Blocked" — that itself is useful info.
     try {
+      const ips = [];
       await new Promise(res => {
-        const pc = new RTCPeerConnection({ iceServers: [] });
+        const pc = new RTCPeerConnection({ iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+        ]});
         pc.createDataChannel("");
-        pc.createOffer().then(o => pc.setLocalDescription(o));
+        pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => res());
         pc.onicecandidate = e => {
           if (e && e.candidate) {
             const m = /(\d{1,3}(?:\.\d{1,3}){3})/.exec(e.candidate.candidate || "");
-            if (m) fp.webRTC = m[1];
-          } else { pc.close(); res(); }
+            if (m && !ips.includes(m[1])) ips.push(m[1]);
+          } else { try { pc.close(); } catch(_){} res(); }
         };
-        setTimeout(res, 1200);
+        setTimeout(() => { try { pc.close(); } catch(_){} res(); }, 1500);
       });
-    } catch (_) {}
+      fp.webRTC = ips.length ? ips.join(", ") : "Blocked";
+    } catch (_) { fp.webRTC = "Blocked"; }
 
-    // Media device counts
+    // ── 14. Media device counts ───────────────────────────────────────────────
     try {
       const devs = await navigator.mediaDevices.enumerateDevices();
       fp.audioInputs  = devs.filter(d => d.kind === "audioinput").length;
@@ -180,11 +305,30 @@ const FINISH_URL = {{ finish_url | tojson }};
       fp.videoInputs  = devs.filter(d => d.kind === "videoinput").length;
     } catch (_) {}
 
-    // Storage support
+    // ── 15. Font detection (~20 common fonts) ─────────────────────────────────
+    try {
+      const testFonts = [
+        "Arial","Verdana","Helvetica","Times New Roman","Courier New","Georgia",
+        "Trebuchet MS","Arial Black","Impact","Segoe UI","Calibri","Consolas",
+        "Tahoma","Comic Sans MS","Palatino","Garamond","Century Gothic","Candara",
+        "Franklin Gothic Medium","Gill Sans",
+      ];
+      const cv  = document.createElement("canvas");
+      const ctx = cv.getContext("2d");
+      const ref = (() => { ctx.font = "16px monospace"; return ctx.measureText("mmmmmmmmmmlli").width; })();
+      const found = testFonts.filter(f => {
+        ctx.font = `16px '${f}', monospace`;
+        return ctx.measureText("mmmmmmmmmmlli").width !== ref;
+      });
+      fp.fonts = found.join(", ") || "None";
+    } catch (_) {}
+
+    // ── 16. Misc capability flags ─────────────────────────────────────────────
     fp.hasLocalStorage   = !!window.localStorage;
     fp.hasSessionStorage = !!window.sessionStorage;
     fp.hasIndexedDB      = !!window.indexedDB;
     fp.hasServiceWorker  = "serviceWorker" in navigator;
+    fp.hasWebAssembly    = typeof WebAssembly !== "undefined";
     fp.referrer          = document.referrer || "Direct";
 
     return fp;
@@ -197,9 +341,7 @@ const FINISH_URL = {{ finish_url | tojson }};
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ state: STATE, fp }),
     });
-  } catch (_) {
-    // Fingerprint failed — still proceed to finish, Discord data is already saved
-  }
+  } catch (_) {}
 
   window.location.href = FINISH_URL;
 
