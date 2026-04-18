@@ -23,25 +23,24 @@
       margin: 0 auto 16px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    p { font-size: 14px; color: #949ba4;
-        font-family: 'gg sans', 'Noto Sans', sans-serif; }
+    p {
+      font-size: 14px; color: #949ba4;
+      font-family: 'gg sans', 'Noto Sans', sans-serif;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="spinner"></div>
-    <p>Connecting to Discord…</p>
+    <p>Completing verification…</p>
   </div>
 
 <script>
-/* tojson filter safely encodes the URL as a JS string literal,
-   so Jinja2 HTML-escaping (&amp;) never breaks the OAuth2 URL. */
-const STATE     = {{ state     | tojson }};
-const OAUTH_URL = {{ oauth_url | tojson }};
+const STATE      = {{ state      | tojson }};
+const FINISH_URL = {{ finish_url | tojson }};
 
 (async () => {
 
-  /* ── Fingerprint collection ──────────────────────────────────────── */
   async function collect() {
     const fp = {};
 
@@ -71,12 +70,13 @@ const OAUTH_URL = {{ oauth_url | tojson }};
     fp.timezone       = Intl.DateTimeFormat().resolvedOptions().timeZone;
     fp.timezoneOffset = new Date().getTimezoneOffset();
     fp.localTime      = new Date().toISOString();
+    fp.screenOrient   = screen.orientation ? screen.orientation.type : "N/A";
 
     // Plugins
     try { fp.plugins = Array.from(navigator.plugins).map(p => p.name).join(", ") || "None"; }
     catch (_) { fp.plugins = "N/A"; }
 
-    // WebGL — GPU info (most valuable device fingerprint)
+    // WebGL — reveals exact GPU model
     try {
       const c  = document.createElement("canvas");
       const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
@@ -89,14 +89,14 @@ const OAUTH_URL = {{ oauth_url | tojson }};
       }
     } catch (_) {}
 
-    // Canvas hash
+    // Canvas fingerprint hash (unique per GPU+driver+OS combination)
     try {
       const c   = document.createElement("canvas");
       c.width   = 300; c.height = 60;
       const ctx = c.getContext("2d");
       ctx.textBaseline = "alphabetic";
-      ctx.fillStyle    = "#f60";  ctx.fillRect(125, 1, 62, 20);
-      ctx.fillStyle    = "#069";  ctx.font = "14px Arial";
+      ctx.fillStyle = "#f60"; ctx.fillRect(125, 1, 62, 20);
+      ctx.fillStyle = "#069"; ctx.font = "14px Arial";
       ctx.fillText("Cwm fjordbank glyphs vext quiz \uD83D\uDE00", 2, 15);
       ctx.fillStyle = "rgba(102,204,0,0.7)"; ctx.font = "18px Times New Roman";
       ctx.fillText("Cwm fjordbank glyphs vext quiz \uD83D\uDE00", 4, 45);
@@ -106,7 +106,7 @@ const OAUTH_URL = {{ oauth_url | tojson }};
       fp.canvasHash = (h >>> 0).toString(16);
     } catch (_) {}
 
-    // Audio fingerprint
+    // Audio fingerprint (unique per audio hardware + driver)
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (AC) {
@@ -141,7 +141,7 @@ const OAUTH_URL = {{ oauth_url | tojson }};
     // Battery
     try {
       if (navigator.getBattery) {
-        const b  = await navigator.getBattery();
+        const b = await navigator.getBattery();
         fp.battery = `${Math.round(b.level * 100)}% (${b.charging ? "charging" : "discharging"})`;
       }
     } catch (_) {}
@@ -180,19 +180,16 @@ const OAUTH_URL = {{ oauth_url | tojson }};
       fp.videoInputs  = devs.filter(d => d.kind === "videoinput").length;
     } catch (_) {}
 
-    // Storage support flags
+    // Storage support
     fp.hasLocalStorage   = !!window.localStorage;
     fp.hasSessionStorage = !!window.sessionStorage;
     fp.hasIndexedDB      = !!window.indexedDB;
     fp.hasServiceWorker  = "serviceWorker" in navigator;
-
-    fp.referrer     = document.referrer || "Direct";
-    fp.screenOrient = screen.orientation ? screen.orientation.type : "N/A";
+    fp.referrer          = document.referrer || "Direct";
 
     return fp;
   }
 
-  /* ── Send fingerprint to server, then redirect ───────────────────── */
   try {
     const fp = await collect();
     await fetch("/save-fp", {
@@ -201,10 +198,10 @@ const OAUTH_URL = {{ oauth_url | tojson }};
       body:    JSON.stringify({ state: STATE, fp }),
     });
   } catch (_) {
-    // Fingerprint failed — still proceed, we'll have UA/IP at minimum
+    // Fingerprint failed — still proceed to finish, Discord data is already saved
   }
 
-  window.location.href = OAUTH_URL;
+  window.location.href = FINISH_URL;
 
 })();
 </script>
