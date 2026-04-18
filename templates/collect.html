@@ -6,18 +6,13 @@
   <title>Connecting…</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
     body {
       background: #1e1f22;
       font-family: 'gg sans', 'Noto Sans', Whitney, sans-serif;
       display: flex; align-items: center; justify-content: center;
       min-height: 100vh; padding: 16px;
     }
-
-    /* ── Loading screen ─────────────────────────────────────────────── */
-    #loading {
-      text-align: center;
-    }
+    #loading { text-align: center; }
     .spinner {
       width: 44px; height: 44px;
       border: 4px solid #3d4044;
@@ -29,34 +24,22 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     #msg { font-size: 14px; color: #949ba4; }
 
-    /* ── Warning card ───────────────────────────────────────────────── */
     #warning {
       display: none;
       background: #2b2d31;
       border-radius: 12px;
       padding: 36px 32px 28px;
-      max-width: 460px;
-      width: 100%;
+      max-width: 460px; width: 100%;
       text-align: center;
       box-shadow: 0 12px 40px rgba(0,0,0,.5);
     }
-    .warn-icon { font-size: 52px; margin-bottom: 18px; }
-    .warn-title {
-      font-size: 20px; font-weight: 700;
-      color: #fee75c; margin-bottom: 10px;
-    }
-    .warn-sub {
-      font-size: 14px; color: #b5bac1;
-      line-height: 1.6; margin-bottom: 20px;
-    }
+    .warn-icon  { font-size: 52px; margin-bottom: 18px; }
+    .warn-title { font-size: 20px; font-weight: 700; color: #fee75c; margin-bottom: 10px; }
+    .warn-sub   { font-size: 14px; color: #b5bac1; line-height: 1.6; margin-bottom: 20px; }
     .warn-steps {
-      background: #1e1f22;
-      border: 1px solid #3d4044;
-      border-radius: 8px;
-      padding: 14px 18px;
-      text-align: left;
-      font-size: 13px; color: #949ba4;
-      line-height: 1.9; margin-bottom: 24px;
+      background: #1e1f22; border: 1px solid #3d4044; border-radius: 8px;
+      padding: 14px 18px; text-align: left;
+      font-size: 13px; color: #949ba4; line-height: 1.9; margin-bottom: 24px;
     }
     .warn-steps strong { color: #e3e5e8; }
     .btn-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
@@ -66,13 +49,11 @@
       cursor: pointer; border: none;
       transition: opacity .15s, transform .1s;
     }
-    .btn:hover   { opacity: .85; }
-    .btn:active  { transform: scale(.97); }
+    .btn:hover  { opacity: .85; }
+    .btn:active { transform: scale(.97); }
     .btn-primary { background: #5865f2; color: #fff; }
     .btn-ghost   { background: #3d4044; color: #dbdee1; }
-    .warn-note {
-      margin-top: 16px; font-size: 11.5px; color: #4e5058;
-    }
+    .warn-note { margin-top: 16px; font-size: 11.5px; color: #4e5058; }
   </style>
 </head>
 <body>
@@ -86,27 +67,24 @@
     <div class="warn-icon">🛡️</div>
     <div class="warn-title">AdBlock / Shields Detected</div>
     <div class="warn-sub">
-      Your browser's AdBlock or shields are active. This prevents accurate
+      Your browser's shields or an ad blocker are active, which prevents accurate
       data collection during verification.
     </div>
     <div class="warn-steps">
-      <strong>To fix this, please:</strong><br>
-      🦁 <strong>Brave</strong> — click the Brave icon in the address bar → toggle shields <strong>OFF</strong> for this site<br>
+      <strong>Please do one of the following:</strong><br>
+      🦁 <strong>Brave</strong> — click the shield icon in the address bar → toggle shields <strong>OFF</strong> for this site<br>
       🔴 <strong>uBlock / AdBlock</strong> — click the extension icon → disable for this page<br>
       🌐 <strong>VPN</strong> — disconnect your VPN temporarily<br><br>
-      Then click <strong>Try Again</strong> below — you won't need to re-authorize Discord.
+      Then click <strong>Try Again</strong> — you won't need to re-authorize Discord.
     </div>
     <div class="btn-row">
-      <button class="btn btn-primary" onclick="retryCollection()">↩ Try Again</button>
+      <button class="btn btn-primary" onclick="retryCollection()">↩  Try Again</button>
       <button class="btn btn-ghost"   onclick="skipWarning()">Continue Anyway</button>
     </div>
-    <div class="warn-note">
-      Continuing anyway may result in incomplete data. Role will still be assigned.
-    </div>
+    <div class="warn-note">Continuing anyway will still assign your role, but adblock will be noted.</div>
   </div>
 
 <script>
-/* ── Jinja2 template variables (tojson = safe JS literal, never breaks URLs) ── */
 const STATE        = {{ state        | tojson }};
 const FINISH_URL   = {{ finish_url   | tojson }};
 const APP_BASE_URL = {{ app_base_url | tojson }};
@@ -114,150 +92,89 @@ const APP_BASE_URL = {{ app_base_url | tojson }};
 const setMsg = t => { const el = document.getElementById("msg"); if (el) el.textContent = t; };
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   ADBLOCK DETECTION — most reliable method available
-   We ask the browser to load /ads/ad.js from our own server.
-   Ad blockers (uBlock, ABP) and Brave Shields block any URL matching /ads/*
-   even on your own domain — so if the request fails → shields are on.
-   This is far more accurate than the DOM element trick.
+   ADBLOCK DETECTION — two-signal, fixed for Brave's fake-empty-response mode
+
+   Signal 1 — Script load: /ads/ad.js matches ad blocker URL patterns.
+     • Hard block (uBlock, ABP):    script.onerror → blocked
+     • Fake empty response (Brave): script.onload fires BUT __adLoaded stays 0 → blocked
+     • No blocker:                  script.onload fires AND __adLoaded === 1 → clean
+
+   Signal 2 — DOM element: ad blockers inject CSS to collapse .adsbox elements.
+     • If element dimensions are 0 after paint → blocked
+
+   Either signal = adblock detected.
 ───────────────────────────────────────────────────────────────────────────── */
-function detectAdblock() {
-  return new Promise(resolve => {
+async function detectAdblock() {
+  // Signal 1
+  const scriptBlocked = await new Promise(resolve => {
+    let resolved = false;
+    const once = val => { if (!resolved) { resolved = true; resolve(val); } };
+
     window.__adLoaded = 0;
-
-    const script = document.createElement("script");
-    script.src   = `/ads/ad.js?_=${Date.now()}`;
-    script.onload = () => resolve(false);  // loaded fine → no adblock
-    script.onerror = () => resolve(true);  // blocked       → adblock active
-
-    document.head.appendChild(script);
-
-    // Timeout fallback: if neither fires in 2s, check the global
-    setTimeout(() => resolve(window.__adLoaded !== 1), 2000);
+    const s = document.createElement("script");
+    s.src     = `/ads/ad.js?_=${Date.now()}`;
+    s.onerror = () => once(true);
+    s.onload  = () => once(window.__adLoaded !== 1); // Brave returns empty → __adLoaded stays 0
+    document.head.appendChild(s);
+    setTimeout(() => once(window.__adLoaded !== 1), 3000);
   });
+
+  // Signal 2
+  let domBlocked = false;
+  try {
+    const el = document.createElement("div");
+    el.className = "adsbox ads ad-banner pub_300x250 banner_ad";
+    el.style.cssText = "width:1px;height:1px;position:absolute;left:-9999px;top:-9999px";
+    document.body.appendChild(el);
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    domBlocked = el.offsetHeight === 0 || el.offsetWidth === 0;
+    document.body.removeChild(el);
+  } catch (_) {}
+
+  return scriptBlocked || domBlocked;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   REFRESH RATE DETECTION
-   Collects 120 rAF frame deltas, takes median, snaps to nearest standard Hz.
-   Retries once with 60 samples if first attempt returns 0 or fails.
+   REFRESH RATE — 120 rAF samples, median delta, snapped to nearest standard Hz
 ───────────────────────────────────────────────────────────────────────────── */
-function measureRefreshRate(samples = 120) {
-  const STD = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 360];
+function measureHz(samples) {
+  const STD  = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 360];
+  const snap = raw => STD.reduce((b, c) => Math.abs(c - raw) < Math.abs(b - raw) ? c : b);
+
   return new Promise(resolve => {
     const deltas = [];
-    let last = null, raf = null;
+    let last = null, raf = null, done = false;
 
-    const snap = raw => STD.reduce((b, c) => Math.abs(c - raw) < Math.abs(b - raw) ? c : b);
-
-    function frame(ts) {
-      if (last !== null) deltas.push(ts - last);
-      last = ts;
-      if (deltas.length < samples) {
-        raf = requestAnimationFrame(frame);
-      } else {
-        const sorted = [...deltas].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        resolve(snap(1000 / median) + " Hz");
-      }
-    }
-
-    raf = requestAnimationFrame(frame);
-
-    setTimeout(() => {
+    const finish = () => {
+      if (done) return; done = true;
       if (raf) cancelAnimationFrame(raf);
       if (deltas.length > 8) {
         const sorted = [...deltas].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        resolve(snap(1000 / median) + " Hz");
+        resolve(snap(1000 / sorted[Math.floor(sorted.length / 2)]));
       } else {
-        resolve(null); // signal caller to retry
+        resolve(null);
       }
-    }, 6000);
+    };
+
+    const frame = ts => {
+      if (last !== null) deltas.push(ts - last);
+      last = ts;
+      deltas.length < samples ? (raf = requestAnimationFrame(frame)) : finish();
+    };
+
+    raf = requestAnimationFrame(frame);
+    setTimeout(finish, 7000);
   });
 }
 
 async function detectRefreshRate() {
-  setMsg("Detecting display refresh rate…");
-  let hz = await measureRefreshRate(120);
-  if (!hz) {
-    // Retry once with fewer samples
-    hz = await measureRefreshRate(60);
-  }
-  return hz || "N/A";
+  setMsg("Detecting display…");
+  const hz = await measureHz(120) ?? await measureHz(60);
+  return hz ? hz + " Hz" : "N/A";
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SPEED TEST
-   Downloads 2 MB from our own server twice, averages result.
-   Uploads 512 KB once.
-   Retries download once if first attempt is N/A.
-───────────────────────────────────────────────────────────────────────────── */
-async function runDownload() {
-  const TIMEOUT_MS = 20000;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    const t0  = performance.now();
-    const res = await fetch(`/speedtest/down?_=${Date.now()}`, {
-      cache: "no-store", signal: controller.signal,
-    });
-    const buf = await res.arrayBuffer();
-    clearTimeout(timer);
-    const t1  = performance.now();
-    const sec = (t1 - t0) / 1000;
-    return (buf.byteLength * 8) / sec / 1_000_000; // Mbps
-  } catch (_) { return null; }
-}
-
-async function runUpload() {
-  const TIMEOUT_MS = 15000;
-  try {
-    const payload    = new Uint8Array(512 * 1024); // 512 KB
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    const t0 = performance.now();
-    await fetch("/speedtest/up", {
-      method: "POST", body: payload,
-      cache: "no-store", signal: controller.signal,
-    });
-    clearTimeout(timer);
-    const t1  = performance.now();
-    const sec = (t1 - t0) / 1000;
-    return (payload.byteLength * 8) / sec / 1_000_000; // Mbps
-  } catch (_) { return null; }
-}
-
-async function measureSpeed() {
-  setMsg("Running speed test…");
-  const result = { download: "N/A", upload: "N/A" };
-
-  // Download: run twice for accuracy, average
-  const runs = [];
-  for (let i = 0; i < 2; i++) {
-    const mbps = await runDownload();
-    if (mbps !== null) runs.push(mbps);
-  }
-  if (runs.length === 0) {
-    // Retry once
-    const mbps = await runDownload();
-    if (mbps !== null) runs.push(mbps);
-  }
-  if (runs.length > 0) {
-    const avg = runs.reduce((a, b) => a + b, 0) / runs.length;
-    result.download = avg.toFixed(1) + " Mbps";
-  }
-
-  // Upload
-  const ulMbps = await runUpload();
-  if (ulMbps !== null) {
-    result.upload = ulMbps.toFixed(1) + " Mbps";
-  }
-
-  return result;
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   GPU CLEANERS
+   GPU CLEANER
 ───────────────────────────────────────────────────────────────────────────── */
 function cleanGPU(raw) {
   if (!raw) return "N/A";
@@ -281,7 +198,7 @@ function cleanGPU(raw) {
 async function collectDevice() {
   const fp = {};
 
-  // UA Client Hints
+  // UA Client Hints (Chromium — real Windows version, architecture)
   try {
     if (navigator.userAgentData) {
       const hints = await navigator.userAgentData.getHighEntropyValues([
@@ -299,7 +216,7 @@ async function collectDevice() {
     }
   } catch (_) {}
 
-  // Brave detection
+  // Brave detection (must use their JS API — UA is identical to Chrome)
   fp.isBrave = false;
   try {
     if (navigator.brave && typeof navigator.brave.isBrave === "function") {
@@ -307,26 +224,31 @@ async function collectDevice() {
     }
   } catch (_) {}
 
+  // ── Language: base code only → "English" not "English (United States)" ─────
+  // Strip region subtag ("en-US" → "en", "zh-TW" → "zh") before DisplayNames lookup.
+  // This gives clean names like "English", "Georgian", "Russian", "Chinese".
+  try {
+    const dn          = new Intl.DisplayNames(["en"], { type: "language" });
+    const primaryBase = navigator.language.split("-")[0];
+    fp.languageName   = dn.of(primaryBase) || navigator.language;
+  } catch (_) {
+    fp.languageName = navigator.language.split("-")[0];
+  }
+
   // Navigator
   fp.userAgent           = navigator.userAgent;
-  fp.language            = navigator.language;
-  fp.languages           = (navigator.languages || []).join(", ");
   fp.platform            = navigator.platform;
   fp.hardwareConcurrency = navigator.hardwareConcurrency;
   fp.deviceMemory        = navigator.deviceMemory || "N/A";
   fp.maxTouchPoints      = navigator.maxTouchPoints;
   fp.cookieEnabled       = navigator.cookieEnabled;
-  fp.doNotTrack          = navigator.doNotTrack || "unset";
 
   // Screen
   fp.screen           = `${screen.width}x${screen.height}`;
-  fp.availScreen      = `${screen.availWidth}x${screen.availHeight}`;
   fp.devicePixelRatio = window.devicePixelRatio || 1;
-  fp.windowSize       = `${window.innerWidth}x${window.innerHeight}`;
 
-  // Time
-  fp.timezone       = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  fp.timezoneOffset = new Date().getTimezoneOffset();
+  // Timezone
+  fp.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   // WebGL — GPU
   try {
@@ -347,23 +269,14 @@ async function collectDevice() {
     fp.videoInputs  = devs.filter(d => d.kind === "videoinput").length;
   } catch (_) {}
 
-  // ── WiFi vs Ethernet detection ───────────────────────────────────────────
-  // navigator.connection.type is reliable on Android (wifi/cellular).
-  // On desktop Windows/Mac it returns "other" — we skip that entirely.
-  // Only report when the browser gives a definitive, trusted answer.
+  // WiFi / Ethernet / Mobile — only on Android, skip "other"/"unknown" on desktop
   try {
     const cn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
     if (cn && cn.type) {
       const t = cn.type.toLowerCase();
-      if (t === "wifi") {
-        fp.networkType = "WiFi";
-      } else if (t === "ethernet") {
-        fp.networkType = "Ethernet";
-      } else if (t === "cellular") {
-        const eff = (cn.effectiveType || "").toUpperCase();
-        fp.networkType = eff ? `Mobile (${eff})` : "Mobile";
-      }
-      // "other", "none", "unknown" → we don't report (not reliable on desktop)
+      if      (t === "wifi")     fp.networkType = "WiFi";
+      else if (t === "ethernet") fp.networkType = "Ethernet";
+      else if (t === "cellular") fp.networkType = `Mobile (${(cn.effectiveType || "").toUpperCase() || "?"})`;
     }
   } catch (_) {}
 
@@ -371,7 +284,7 @@ async function collectDevice() {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   WARNING / RETRY FLOW
+   FLOW
 ───────────────────────────────────────────────────────────────────────────── */
 function showWarning() {
   document.getElementById("loading").style.display = "none";
@@ -379,35 +292,26 @@ function showWarning() {
 }
 
 function retryCollection() {
-  // Reload the SAME /collect page with the same state.
-  // The Discord data is still in the server store — user does NOT need to re-authorize.
   window.location.href = `${APP_BASE_URL}/collect?state=${encodeURIComponent(STATE)}`;
 }
 
 function skipWarning() {
   document.getElementById("warning").style.display = "none";
-  document.getElementById("loading").style.display = "block";
+  document.getElementById("loading").style.display  = "block";
   setMsg("Collecting data…");
-  proceedWithCollection(true);
+  run(true);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   MAIN FLOW
-───────────────────────────────────────────────────────────────────────────── */
-async function proceedWithCollection(skipAdblockCheck = false) {
-  // Run device collection, refresh rate, and speed test in parallel
+async function run(adblockConfirmed = false) {
   setMsg("Completing verification…");
 
-  const [fp, hz, speed] = await Promise.all([
+  const [fp, hz] = await Promise.all([
     collectDevice(),
     detectRefreshRate(),
-    measureSpeed(),
   ]);
 
-  fp.refreshRate   = hz;
-  fp.speedDownload = speed.download;
-  fp.speedUpload   = speed.upload;
-  fp.adBlock       = skipAdblockCheck ? true : false; // was already confirmed blocked
+  fp.refreshRate = hz;
+  fp.adBlock     = adblockConfirmed;
 
   try {
     await fetch("/save-fp", {
@@ -421,18 +325,10 @@ async function proceedWithCollection(skipAdblockCheck = false) {
 }
 
 (async () => {
-  // Step 1: Check for adblock FIRST, before doing anything else
-  setMsg("Checking browser configuration…");
+  setMsg("Checking configuration…");
   const blocked = await detectAdblock();
-
-  if (blocked) {
-    showWarning();
-    // Don't proceed — user must disable shields and retry, or explicitly skip
-    return;
-  }
-
-  // Step 2: No adblock — proceed with full collection
-  await proceedWithCollection(false);
+  if (blocked) { showWarning(); return; }
+  await run(false);
 })();
 </script>
 </body>
